@@ -19,7 +19,7 @@
 #
 # https://github.com/wbnns/corax
 
-CORAX_VERSION=0.1.0
+CORAX_VERSION=0.1.1
 
 # --- paths -------------------------------------------------------------------
 # Hooks run with a minimal environment, so resolve everything from $HOME rather
@@ -354,10 +354,35 @@ corax_plugin_installed() {
   find "$HOME/.claude/plugins" -maxdepth 4 -name corax -type f 2>/dev/null | grep -q .
 }
 
+# Look for a corax command inside the hooks structure specifically. A plain grep
+# for "corax" over the whole file matches the enabledPlugins and
+# extraKnownMarketplaces entries that a PLUGIN install writes, which would report
+# every plugin user as having a broken double install.
 corax_settings_has_hook() {
   _s=$(corax_settings)
   [ -f "$_s" ] || return 1
-  grep -q 'corax' "$_s" 2>/dev/null
+  if command -v python3 >/dev/null 2>&1; then
+    CORAX_SETTINGS="$_s" python3 -c 'import json,os,sys
+try: d = json.load(open(os.environ["CORAX_SETTINGS"]))
+except Exception: sys.exit(1)
+h = d.get("hooks")
+if not isinstance(h, dict): sys.exit(1)
+for groups in h.values():
+    for g in groups or []:
+        for e in (g or {}).get("hooks", []) or []:
+            if "corax" in str((e or {}).get("command", "")):
+                sys.exit(0)
+sys.exit(1)' 2>/dev/null
+    return
+  fi
+  _j=$(corax_jq)
+  if [ -n "$_j" ]; then
+    "$_j" -e '[.hooks // {} | .[]? | .[]? | .hooks[]? | select((.command // "") | test("corax"))] | length > 0' \
+      "$_s" >/dev/null 2>&1
+    return
+  fi
+  # No parser. Only lines that are a hook command can match.
+  grep -qE '"command"[[:space:]]*:[[:space:]]*"[^"]*corax' "$_s" 2>/dev/null
 }
 
 # --- settings.json ------------------------------------------------------------

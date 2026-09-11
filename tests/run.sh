@@ -312,6 +312,48 @@ reset 'CORAX_ENABLED=0'
 env CORAX_CONFIG="$WORK/config" CORAX_SINK="$WORK/sink" sh "$CORAX" send 'nope' >/dev/null 2>&1
 is "send respects the kill switch" 0 "$(grep -c 'nope' "$WORK/sink" || true)"
 
+# --- settings detection ------------------------------------------------------
+# doctor decides whether hooks are registered in settings.json. A plugin install
+# writes "corax@corax" into enabledPlugins and extraKnownMarketplaces, so a plain
+# grep for the word reports every plugin user as a broken double install.
+
+printf '\nsettings detection\n'
+
+mkdir -p "$WORK/home/.claude"
+cat > "$WORK/home/.claude/settings.json" <<'JSON'
+{
+  "enabledPlugins": { "corax@corax": true },
+  "extraKnownMarketplaces": { "corax": { "source": { "source": "github", "repo": "wbnns/corax" } } },
+  "hooks": {
+    "Notification": [
+      { "matcher": "idle_prompt",
+        "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/some-other-tool.sh" }] }
+    ]
+  }
+}
+JSON
+HOME="$WORK/home" sh "$CORAX" doctor >"$WORK/doc" 2>&1 || true
+if grep -q 'BOTH as a plugin' "$WORK/doc"; then
+  bad "a plugin install alone is not a double install" "no BOTH warning" "warned"
+else
+  ok "a plugin install alone is not a double install"
+fi
+
+# ...but a real corax hook command in the same file must still be detected.
+cat > "$WORK/home/.claude/settings.json" <<'JSON'
+{
+  "hooks": {
+    "Stop": [ { "hooks": [{ "type": "command", "command": "sh \"$HOME/.local/bin/corax\"" }] } ]
+  }
+}
+JSON
+HOME="$WORK/home" sh "$CORAX" doctor >"$WORK/doc" 2>&1 || true
+if grep -q 'registered in' "$WORK/doc"; then
+  ok "a corax hook command in settings.json is detected"
+else
+  bad "a corax hook command in settings.json is detected" "registered in ..." "$(grep -c . "$WORK/doc") lines, no match"
+fi
+
 # --- result ------------------------------------------------------------------
 
 printf '\n%s passed, %s failed\n\n' "$PASS" "$FAIL"

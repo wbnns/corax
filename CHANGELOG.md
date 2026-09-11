@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-11
+
+### Fixed
+
+- `doctor` reported a double install for anyone who installed the plugin. It
+  looked for the word corax anywhere in `settings.json`, and a plugin install
+  writes `corax@corax` into `enabledPlugins` and `extraKnownMarketplaces`. It now
+  looks for a corax command inside the hooks structure specifically, so the
+  warning fires only when hooks really are registered twice.
+
 ## [0.1.0] - 2026-09-11
 
 First release.
@@ -32,5 +42,6 @@ First release.
 - Privacy controls: a `.no-corax` file per project, `CORAX_REDACT=1` to drop the
   folder and branch, and `corax off` for the whole machine.
 
-[Unreleased]: https://github.com/wbnns/corax/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/wbnns/corax/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/wbnns/corax/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/wbnns/corax/releases/tag/v0.1.0
