@@ -331,6 +331,147 @@ reset 'CORAX_ENABLED=0'
 env CORAX_CONFIG="$WORK/config" CORAX_SINK="$WORK/sink" sh "$CORAX" send 'nope' >/dev/null 2>&1
 is "send respects the kill switch" 0 "$(grep -c 'nope' "$WORK/sink" || true)"
 
+# --- network transports ------------------------------------------------------
+# The command sink cannot see a request body, so the transports that actually
+# POST have never been covered. They get a second double: a stub curl on PATH
+# that records argv, whatever config it is handed on stdin, and the -d body,
+# each in its own file. Nothing touches the network.
+#
+# It has to be driven through `corax send`. Hook mode rewrites PATH to put the
+# system directories first, so a stub placed there would be shadowed by the real
+# curl and every one of these tests would try to reach the internet.
+
+printf '\nnetwork transports\n'
+
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/curl" <<'CURL'
+#!/bin/sh
+_prev=
+for _a in "$@"; do
+  [ "$_prev" = "-d" ] && printf '%s' "$_a" > "$WIRE/body"
+  printf '%s\n' "$_a" >> "$WIRE/argv"
+  _prev=$_a
+done
+cat >> "$WIRE/stdin"
+CURL
+chmod +x "$WORK/bin/curl"
+
+# wire <transport> <text> [config lines...]
+# Leaves $WIRE/argv, $WIRE/stdin and $WIRE/body for the assertions to read.
+WIRE="$WORK/wire"
+wire() {
+  rm -rf "$WIRE"; mkdir -p "$WIRE"
+  : > "$WIRE/argv"; : > "$WIRE/stdin"; : > "$WIRE/body"
+  _wt=$1; _wx=$2; shift 2
+  {
+    printf 'CORAX_TRANSPORT=%s\n' "$_wt"
+    for _wl in "$@"; do printf '%s\n' "$_wl"; done
+  } > "$WORK/config"
+  env CORAX_CONFIG="$WORK/config" WIRE="$WIRE" \
+    PATH="$WORK/bin:$PATH" sh "$CORAX" send "$_wx" >/dev/null 2>&1
+}
+
+# saw <file> <pattern> -> 1 when the pattern is there, 0 when it is not
+saw() {
+  if grep -q "$2" "$WIRE/$1" 2>/dev/null; then echo 1; else echo 0; fi
+}
+
+SLACK_URL='https://hooks.slack.com/services/T00/B00/sEcReT'
+DISCORD_URL='https://discord.com/api/webhooks/123/sEcReT'
+
+wire slack hi "CORAX_SLACK_WEBHOOK_URL=$SLACK_URL"
+is "slack sends the text key" 1 "$(saw body '"text"')"
+is "slack does not send discord's key" 0 "$(saw body '"content"')"
+
+wire discord hi "CORAX_DISCORD_WEBHOOK_URL=$DISCORD_URL"
+is "discord sends the content key" 1 "$(saw body '"content"')"
+is "discord does not send slack's key" 0 "$(saw body '"text"')"
+
+# The invariant the generic webhook used to break. A webhook url carries its own
+# secret in the path, so it is a credential and must never reach argv, where any
+# other user on the box can read it out of ps.
+wire slack hi "CORAX_SLACK_WEBHOOK_URL=$SLACK_URL"
+is "slack keeps its url out of argv" 0 "$(saw argv sEcReT)"
+is "slack passes its url on stdin" 1 "$(saw stdin sEcReT)"
+
+wire discord hi "CORAX_DISCORD_WEBHOOK_URL=$DISCORD_URL"
+is "discord keeps its url out of argv" 0 "$(saw argv sEcReT)"
+is "discord passes its url on stdin" 1 "$(saw stdin sEcReT)"
+
+wire webhook hi "CORAX_WEBHOOK_URL=$SLACK_URL"
+is "the generic webhook keeps its url out of argv" 0 "$(saw argv sEcReT)"
+is "the generic webhook passes its url on stdin" 1 "$(saw stdin sEcReT)"
+
+wire twilio hi \
+  'CORAX_TWILIO_SID=AC123' 'CORAX_TWILIO_TOKEN=tOkEnSeCrEt' \
+  'CORAX_TWILIO_FROM=+15550001111' 'CORAX_TWILIO_TO=+15550002222'
+is "twilio sends the message body" 1 "$(saw argv '^Body=')"
+is "twilio sends from" 1 "$(saw argv '^From=+15550001111$')"
+is "twilio sends to" 1 "$(saw argv '^To=+15550002222$')"
+is "twilio keeps the auth token out of argv" 0 "$(saw argv tOkEnSeCrEt)"
+is "twilio passes the auth token on stdin" 1 "$(saw stdin tOkEnSeCrEt)"
+
+# Discord renders markdown in content, and a folder or branch name is exactly
+# the kind of string that carries an underscore.
+# shellcheck disable=SC2016  # the backticks are literal input, not a command
+wire discord 'feat_x `tick` *star*' "CORAX_DISCORD_WEBHOOK_URL=$DISCORD_URL"
+is "discord escapes an underscore" 1 "$(saw body 'feat\\\\_x')"
+# shellcheck disable=SC2016  # likewise: this is a grep pattern for a backtick
+is "discord escapes a backtick" 1 "$(saw body '\\\\`tick\\\\`')"
+is "discord escapes an asterisk" 1 "$(saw body '\\\\\*star\\\\\*')"
+
+wire slack 'a & b < c > d' "CORAX_SLACK_WEBHOOK_URL=$SLACK_URL"
+is "slack escapes the three characters it reserves" 1 \
+   "$(saw body 'a &amp; b &lt; c &gt; d')"
+
+# A quote or a backslash in a branch name must not be able to break the body.
+# Both code paths get the same input: jq when it is there, and the hand-rolled
+# escaper when it is not. CORAX_JQ pointed at nothing forces the second, which
+# is the only way to reach it on a machine that has jq installed.
+QUOTED='he said "hi" and \ too'
+
+wire slack "$QUOTED" "CORAX_SLACK_WEBHOOK_URL=$SLACK_URL" "CORAX_JQ=$WORK/no-such-jq"
+is "the no-jq fallback escapes a quote" 1 "$(saw body 'said \\"hi\\"')"
+is "the no-jq fallback escapes a backslash" 1 "$(saw body 'and \\\\ too')"
+is "the no-jq fallback still closes the object" 1 "$(saw body '}$')"
+
+if command -v jq >/dev/null 2>&1; then
+  wire slack "$QUOTED" "CORAX_SLACK_WEBHOOK_URL=$SLACK_URL" "CORAX_JQ=$(command -v jq)"
+  if jq -e . "$WIRE/body" >/dev/null 2>&1; then
+    ok "the jq path produces valid json for the same input"
+  else
+    bad "the jq path produces valid json for the same input" "valid json" "$(cat "$WIRE/body")"
+  fi
+  is "the jq path round-trips the text unchanged" "[corax] $HOST: $QUOTED" \
+     "$(jq -r '.text' "$WIRE/body" 2>/dev/null)"
+else
+  ok "the jq path (skipped, no jq on this machine)"
+  ok "the jq round trip (skipped, no jq on this machine)"
+fi
+
+# Missing configuration is a silent no-op, never an error and never a request.
+for _t in slack discord twilio webhook; do
+  wire "$_t" hi
+  is "$_t with no credentials makes no request" 0 \
+     "$(wc -c < "$WIRE/argv" | tr -d ' ')"
+done
+
+# Every new key has to be in the allowlist or /corax:setup cannot write it, and
+# every credential has to be in the redaction list or `config show` prints it.
+: > "$WORK/config"
+for _k in CORAX_SLACK_WEBHOOK_URL CORAX_DISCORD_WEBHOOK_URL \
+          CORAX_TWILIO_SID CORAX_TWILIO_TOKEN CORAX_TWILIO_FROM CORAX_TWILIO_TO \
+          CORAX_HEARTBEAT_WARN_HOURS; do
+  env CORAX_CONFIG="$WORK/config" sh "$CORAX" config set "$_k" sEcReT >/dev/null 2>&1
+  is "config set accepts $_k" 0 "$?"
+done
+shown=$(env CORAX_CONFIG="$WORK/config" sh "$CORAX" config show 2>/dev/null)
+for _k in CORAX_SLACK_WEBHOOK_URL CORAX_DISCORD_WEBHOOK_URL CORAX_TWILIO_TOKEN; do
+  is "config show redacts $_k" 1 "$(printf '%s' "$shown" | grep -c "^$_k=<redacted>$")"
+done
+is "config show leaves a non-secret alone" 1 \
+   "$(printf '%s' "$shown" | grep -c '^CORAX_TWILIO_FROM=sEcReT$')"
+
 # --- settings detection ------------------------------------------------------
 # doctor decides whether hooks are registered in settings.json. A plugin install
 # writes "corax@corax" into enabledPlugins and extraKnownMarketplaces, so a plain

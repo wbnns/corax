@@ -20,7 +20,8 @@ branch:
 needs permission to run a tool
 ```
 
-That goes to Telegram, to ntfy, to any webhook, or to a command you supply.
+That goes wherever you already look: Telegram, Slack, Discord, ntfy, an SMS
+through Twilio, any webhook, or a command you supply.
 
 The alternatives get this wrong in predictable ways. A terminal bell notifies
 the machine you are not looking at. A raw `curl` in your settings file has no
@@ -61,7 +62,7 @@ corax init
 
 `corax` is one POSIX shell script with no dependency but `curl`. There is no
 node, no python, no virtualenv. If you would rather read it before running it,
-it is about nine hundred lines with the reasoning in the comments, and you can
+it is about eleven hundred lines with the reasoning in the comments, and you can
 also `npx @wbnns/corax init` or clone the repo and run `./corax` in place.
 
 ## What it tells you about
@@ -96,12 +97,27 @@ with Claude Code.
 | --- | --- | --- |
 | ntfy | A topic name. No account. | Anyone who knows the topic, which is why `init` generates a random one |
 | telegram | A bot from @BotFather | Telegram, and anyone holding your bot token |
+| slack | An incoming webhook URL | Everyone in that channel, and anyone holding the URL |
+| discord | An incoming webhook URL | Everyone in that channel, and anyone holding the URL |
+| twilio | An account sid, an auth token, and two phone numbers. **Billed per message** | Twilio, and your carrier |
 | webhook | A URL. Receives `{"text": "..."}` | Whoever runs the endpoint |
 | command | Any command. Gets the message as its one argument | Nobody, unless your command sends it somewhere |
 
+An incoming webhook URL is a password. Anyone holding it can post to that
+channel, so corax keeps it out of `ps` and redacts it in `corax config show`.
+
+Twilio is the only one that costs money, and a turn ends on every exchange, so
+left alone it would be a hundred billed texts in a working day. `corax init`
+sets `CORAX_STOP=0` for you when you pick it, which drops the turn-finished
+pings and keeps everything that actually blocks you. Put `whatsapp:` in front of
+both numbers to send WhatsApp instead of SMS.
+
 `corax init` walks you through whichever you pick. For Telegram it does the part
 everyone gets stuck on: after you paste the token, it waits for you to message
-the bot and reads your chat id back out, so you never go looking for it.
+the bot and reads your chat id back out, so you never go looking for it. For
+Slack and Discord it says so when a URL does not look like one of theirs, and
+for Twilio it checks the sid and token against the API before writing them, so a
+typo fails at setup rather than silently at three in the morning.
 
 ## Using it
 
@@ -152,11 +168,17 @@ It is plain `KEY=value` sourced by the shell, so you can edit it by hand.
 
 | Key | Default | |
 | --- | --- | --- |
-| `CORAX_TRANSPORT` | | `telegram`, `ntfy`, `webhook` or `command` |
+| `CORAX_TRANSPORT` | | `telegram`, `ntfy`, `slack`, `discord`, `twilio`, `webhook` or `command` |
 | `CORAX_TELEGRAM_TOKEN` | | From @BotFather |
 | `CORAX_TELEGRAM_CHAT` | | Found for you by `corax init` |
 | `CORAX_NTFY_TOPIC` | | Pick something unguessable; `init` generates one |
 | `CORAX_NTFY_URL` | `https://ntfy.sh` | Your own server, if you run one |
+| `CORAX_SLACK_WEBHOOK_URL` | | From a Slack app with Incoming Webhooks on |
+| `CORAX_DISCORD_WEBHOOK_URL` | | Channel settings, Integrations, New Webhook |
+| `CORAX_TWILIO_SID` | | Account sid, from the Twilio console |
+| `CORAX_TWILIO_TOKEN` | | Auth token, from the same place |
+| `CORAX_TWILIO_FROM` | | Your Twilio number, E.164. `whatsapp:` prefix for WhatsApp |
+| `CORAX_TWILIO_TO` | | Your phone, same format |
 | `CORAX_WEBHOOK_URL` | | Receives `{"text": "..."}` |
 | `CORAX_COMMAND` | | Gets the message as its one argument |
 | `CORAX_ENABLED` | `1` | `0` silences everything. `corax off` sets this |
@@ -201,8 +223,11 @@ Three ways to send less:
 - Use the `command` transport, where nothing leaves the machine unless the
   command you wrote sends it.
 
-Your token lives in `~/.config/corax/config` at mode 600 and is never passed on a
-command line, so it does not appear in `ps` to other users on a shared box.
+Your credentials live in `~/.config/corax/config` at mode 600 and are never
+passed on a command line, so they do not appear in `ps` to other users on a
+shared box. That covers the Twilio auth token and the Slack and Discord webhook
+URLs as well as the Telegram bot token: a webhook URL carries its own secret in
+the path, which makes it a password and not an address.
 
 ## What it is not
 

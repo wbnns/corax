@@ -33,6 +33,29 @@ and skip to step 3.
   exits non-zero, the message has not arrived yet: wait a moment and try again, up
   to about five times. When you get an id, `config set CORAX_TELEGRAM_CHAT <id>`.
 
+- **slack** needs an incoming webhook. Tell them to create a Slack app, turn on
+  Incoming Webhooks, add one to the channel they want, and paste the URL here.
+  Then `config set CORAX_TRANSPORT slack` and
+  `config set CORAX_SLACK_WEBHOOK_URL <url>`. Treat that URL as a password:
+  never print it back to them.
+
+- **discord** needs an incoming webhook too. Tell them to open the channel, then
+  Edit Channel, Integrations, Webhooks, New Webhook, Copy Webhook URL. Then
+  `config set CORAX_TRANSPORT discord` and
+  `config set CORAX_DISCORD_WEBHOOK_URL <url>`. Same rule: it is a password.
+
+- **twilio** sends real SMS and bills them per message. Say that before anything
+  else, and only go on if they still want it. The account sid and auth token are
+  on the Twilio console dashboard, and they need a Twilio number to send from.
+  Then `config set CORAX_TRANSPORT twilio`, `config set CORAX_TWILIO_SID <sid>`,
+  `config set CORAX_TWILIO_TOKEN <token>`, `config set CORAX_TWILIO_FROM <+number>`
+  and `config set CORAX_TWILIO_TO <+number>`, all in E.164.
+
+  Then `config set CORAX_STOP 0`. A turn ends on every exchange, so without this
+  they get a billed text for each one. Tell them you have done it, and that
+  anything actually blocking them still sends. `whatsapp:` in front of both
+  numbers sends WhatsApp instead of SMS.
+
 - **webhook**: ask for the URL, then `config set CORAX_TRANSPORT webhook` and
   `config set CORAX_WEBHOOK_URL <url>`. corax POSTs `{"text": "..."}` to it.
 
