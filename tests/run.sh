@@ -262,12 +262,15 @@ LONG=$(printf 'x%.0s' 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 
                        1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 \
                        1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0)
 mkdir -p "$WORK/$LONG"
+# Assert the folder field, not the whole line: the hostname is also a field and
+# CI runners have very long ones, so a whole-line budget tests the wrong thing.
 got=$(send "$(payload Notification permission_prompt "$WORK/$LONG" h2)" | head -1)
-len=$(printf '%s' "$got" | wc -c | tr -d ' ')
-if [ "$len" -lt 120 ]; then
-  ok "a very long folder name is truncated"
+folder=${got##* · }
+len=$(printf '%s' "$folder" | wc -c | tr -d ' ')
+if [ "$len" -le 64 ] && [ "$len" -lt "$(printf '%s' "$LONG" | wc -c | tr -d ' ')" ]; then
+  ok "a very long folder name is truncated to 64"
 else
-  bad "a very long folder name is truncated" "<120 bytes" "$len bytes"
+  bad "a very long folder name is truncated to 64" "<=64 bytes, shorter than the input" "$len bytes"
 fi
 
 reset
