@@ -1,7 +1,7 @@
 {
   "name": "@wbnns/corax",
   "version": "0.4.1",
-  "description": "Tells you when a Claude Code session needs your attention, and which machine is asking.",
+  "description": "Watches your agents from the terminal and tells you and your team when one needs you, naming the machine, folder and branch. Claude Code today, over Telegram, Slack, Discord, ntfy, SMS, any webhook or a local command.",
   "bin": {
     "corax": "corax"
   },

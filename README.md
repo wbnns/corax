@@ -2,18 +2,24 @@
 
 # corax
 
-**Claude Code notifications that tell you which machine and which folder is asking.**
+**corax watches your agents and swarms from the terminal, and lets you and your
+team know when one needs you, wherever that reaches you.**
 
-The desktop banner works fine until you run Claude Code in more than one place.
-Then it tells you that something, somewhere, is waiting. It appears on whichever
-machine has focus rather than the one that is blocked, it says nothing about
-where, and it is gone in five seconds. If your sessions live on a laptop, a
-desktop, and two boxes you reach over a VPN, the banner is close to useless:
-the session that stopped to ask you a question is on a machine whose screen you
-are not looking at, and often cannot see at all.
+In Greek, corax is the raven. Apollo kept one as an omen bird: it flew out, saw
+what people could not, and came back to tell him.
 
-corax replaces it with a message that names the machine, the folder and the
-branch:
+Agents stop and wait. One wants permission to run a command or a tool, another
+wants your input before it goes on, a third has finished and the result is
+sitting there unread. With one agent in one terminal in front of you, you
+notice. With a laptop, a desktop and two boxes you reach over a VPN, you do not.
+
+A desktop app helps only while it is open, and only on the machine you happen to
+be sitting at. It does not carry the part you actually need: which machine
+stopped, which folder and branch it was working in, and what kind of answer it
+wants. A terminal bell has the same problem, and rings on the machine you are
+not looking at.
+
+corax sends you the missing context instead:
 
 ```
 [corax] zulu · a2ciple.pt · main
@@ -23,11 +29,22 @@ needs permission to run a tool
 That goes wherever you already look: Telegram, Slack, Discord, ntfy, an SMS
 through Twilio, any webhook, or a command you supply.
 
-The alternatives get this wrong in predictable ways. A terminal bell notifies
-the machine you are not looking at. A raw `curl` in your settings file has no
-deduplication, puts your bot token in `ps` where every other user on the box can
-read it, and breaks the first time a branch name contains a quote. Desktop
-notifier tools are still, definitionally, local.
+Point it at a channel your team shares and it works for a swarm as well as for
+one person. Everyone sees which agent is blocked and on what. Someone reacts to
+the message to say they have it, and nobody else goes looking. corax does not
+run that process for you. It puts the request somewhere people already are, and
+`corax send 'deploy done'` pushes anything else you want them to know through
+the same transport.
+
+Claude Code is the agent corax speaks today, and it installs there as a plugin.
+The parsing is the only part specific to it. The identity line, the
+deduplication and the transports are not, so a second agent is a new parser
+rather than a rewrite.
+
+The alternatives get this wrong in predictable ways. A raw `curl` in your
+settings file has no deduplication, puts your bot token in `ps` where every
+other user on the box can read it, and breaks the first time a branch name
+contains a quote. Desktop notifier tools are still, definitionally, local.
 
 Most of what is here is not the sending. It is the handful of things that are
 wrong on the first attempt, and stay wrong quietly:
@@ -88,8 +105,8 @@ drops these and keeps everything above.
 A turn ends on every exchange, not only when you walk away, so it is the chatty
 one. If corax is too talkative that is the switch to reach for.
 
-Plus `corax send 'deploy done'` for your own scripts, which has nothing to do
-with Claude Code.
+Plus `corax send 'deploy done'` for your own scripts, or for telling the channel
+anything else you want it to know. That path has nothing to do with Claude Code.
 
 ## Transports
 
@@ -234,9 +251,11 @@ the path, which makes it a password and not an address.
 It does not read your code, summarise anything, or call a model. It is a hook
 that notices a handful of events and sends you two lines of text.
 
-It only knows about Claude Code. The event parsing is specific to Claude Code's
-hook payloads, and that specificity is the whole point. Another agent would be a
-new file, not a rewrite.
+Today it speaks Claude Code and nothing else. The event parsing is specific to
+Claude Code's hook payloads, and that specificity is the whole point: a generic
+notifier would not know that an idle prompt arrives a minute after the turn it
+belongs to, or that a permission request must never share a deduplication window
+with a finished turn. Another agent is a new parser, not a rewrite.
 
 ## Local development
 
