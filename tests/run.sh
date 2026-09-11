@@ -6,6 +6,8 @@
 # Usage: tests/run.sh
 set -u
 
+# shellcheck disable=SC1007  # `CDPATH= cd` is a deliberate env prefix, not an
+# empty assignment: it stops cd from printing a path when CDPATH is set.
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 CORAX=${CORAX:-$ROOT/corax}
 
@@ -20,7 +22,9 @@ FAIL=0
 ok()   { PASS=$((PASS + 1)); printf '  \033[32m.\033[0m %s\n' "$1"; }
 bad()  { FAIL=$((FAIL + 1)); printf '  \033[31mX\033[0m %s\n' "$1"
          printf '      want: %s\n      got:  %s\n' "$2" "$3"; }
-is()   { [ "$2" = "$3" ] && ok "$1" || bad "$1" "$2" "$3"; }
+is() {
+  if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "$2" "$3"; fi
+}
 
 # The command transport is the test double: it appends the message to a file,
 # so a test can assert on exactly what would have been sent.
@@ -84,7 +88,10 @@ printf '\nidentity line\n'
 reset
 GITREPO="$WORK/proj"
 mkdir -p "$GITREPO"
-( cd "$GITREPO" && git init -q && git config user.email t@t && git config user.name t &&
+# Pin the branch name: git's default is main on some distros and master on
+# others, and Alpine picks master, which used to fail this test on CI only.
+( cd "$GITREPO" && git init -q && git symbolic-ref HEAD refs/heads/main &&
+  git config user.email t@t && git config user.name t &&
   : > f && git add f && git commit -qm init ) >/dev/null 2>&1
 HOST=$(hostname -s 2>/dev/null || hostname); HOST=${HOST%%.*}
 
@@ -257,8 +264,11 @@ LONG=$(printf 'x%.0s' 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 
 mkdir -p "$WORK/$LONG"
 got=$(send "$(payload Notification permission_prompt "$WORK/$LONG" h2)" | head -1)
 len=$(printf '%s' "$got" | wc -c | tr -d ' ')
-[ "$len" -lt 120 ] && ok "a very long folder name is truncated" \
-  || bad "a very long folder name is truncated" "<120 bytes" "$len bytes"
+if [ "$len" -lt 120 ]; then
+  ok "a very long folder name is truncated"
+else
+  bad "a very long folder name is truncated" "<120 bytes" "$len bytes"
+fi
 
 reset
 # A Stop payload carries last_assistant_message: arbitrary model output. No

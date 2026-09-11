@@ -1,4 +1,8 @@
 #!/bin/sh
+# shellcheck disable=SC2016
+#   Single-quoted strings containing $ are jq filters and python programs, where
+#   the shell must not expand anything. That is the point of the quoting.
+#
 # corax - tell me when Claude Code needs me, and which machine is asking.
 #
 # One file, two roles:
@@ -97,7 +101,7 @@ if isinstance(d, dict):
     *"\"$1\""*) ;;
     *) return 0 ;;
   esac
-  _p=${_p#*\"$1\"}
+  _p=${_p#*\""$1"\"}
   _p=${_p#*:}
   while :; do case "$_p" in " "*|"	"*) _p=${_p#?} ;; *) break ;; esac; done
   case "$_p" in
@@ -315,6 +319,7 @@ corax_hook() {
 corax_self() {
   # Absolute path to this file, so the hook entry we write keeps working after
   # the caller changes directory.
+  # shellcheck disable=SC1007  # `CDPATH= cd` is an env prefix, not an assignment.
   _d=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || _d=.
   printf '%s/%s' "$_d" "$(basename -- "$0")"
 }
@@ -556,7 +561,7 @@ corax_init_telegram() {
     [ -n "$_chat" ] || return 1
   fi
 
-  CORAX_TRANSPORT=telegram
+  CORAX_TRANSPORT='telegram'
   CORAX_TELEGRAM_TOKEN=$_tok
   CORAX_TELEGRAM_CHAT=$_chat
 }
@@ -569,7 +574,7 @@ corax_init_ntfy() {
   [ -n "$_rand" ] || _rand=$(date +%s)
   _topic=$(corax_ask "topic [corax-$_rand]: " "corax-$_rand")
   _url=$(corax_ask 'server [https://ntfy.sh]: ' 'https://ntfy.sh')
-  CORAX_TRANSPORT=ntfy
+  CORAX_TRANSPORT='ntfy'
   CORAX_NTFY_TOPIC=$_topic
   CORAX_NTFY_URL=$_url
   corax_ok "subscribe to \"$_topic\" at $_url"
@@ -580,7 +585,7 @@ corax_init_webhook() {
   corax_say 'corax will POST {"text": "..."} to this URL.'
   _u=$(corax_ask 'url: ' '')
   [ -n "$_u" ] || { corax_bad 'no url given'; return 1; }
-  CORAX_TRANSPORT=webhook
+  CORAX_TRANSPORT='webhook'
   CORAX_WEBHOOK_URL=$_u
 }
 
@@ -589,7 +594,7 @@ corax_init_command() {
   corax_say 'corax will run this command with the message as its one argument.'
   _c=$(corax_ask 'command: ' '')
   [ -n "$_c" ] || { corax_bad 'no command given'; return 1; }
-  CORAX_TRANSPORT=command
+  CORAX_TRANSPORT='command'
   CORAX_COMMAND=$_c
 }
 
@@ -691,6 +696,7 @@ cmd_doctor() {
   _cf=$(corax_config_file)
   if [ -r "$_cf" ]; then
     corax_ok "config  $_cf"
+    # shellcheck disable=SC2012  # one known path, and stat differs BSD vs GNU.
     _perm=$(ls -l "$_cf" 2>/dev/null | cut -c1-10)
     case "$_perm" in
       -rw-------) ;;
