@@ -1,6 +1,6 @@
 {
   "name": "@wbnns/corax",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Watches your agents from the terminal and tells you and your team when one needs you, naming the machine, folder and branch. Claude Code today, over Telegram, Slack, Discord, ntfy, SMS, any webhook or a local command.",
   "bin": {
     "corax": "corax"

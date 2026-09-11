@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-09-11
+
+### Changed
+
+- The README leads with what corax is for rather than with Claude Code. Agents
+  stop and wait, they do it on machines you are not looking at, and what you
+  need back is which machine, which branch, and what kind of answer it wants.
+  Claude Code is now the agent corax speaks today rather than the whole premise,
+  since only the parsing is specific to it.
+- The README says what a shared channel gives a team: everyone sees which agent
+  is blocked, and a reaction is enough for someone to claim it.
+- The npm `description` carried the old framing, so it moves with the README.
+  The plugin and marketplace descriptions are unchanged, since those are only
+  ever read inside Claude Code.
+
 ## [0.4.1] - 2026-09-11
 
 ### Changed
