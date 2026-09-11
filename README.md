@@ -64,6 +64,32 @@ node, no python, no virtualenv. If you would rather read it before running it,
 it is about nine hundred lines with the reasoning in the comments, and you can
 also `npx @wbnns/corax init` or clone the repo and run `./corax` in place.
 
+## What it tells you about
+
+Two categories. The first is blocking: something is waiting on an answer from
+you and nothing moves until you give one.
+
+| | |
+| --- | --- |
+| Claude wants to run a tool that needs approval | `needs permission to run a tool` |
+| A dialog is waiting on you | `has a dialog waiting for an answer` |
+| A subagent cannot decide alone | `has a subagent waiting on you` |
+| Claude finished a minute ago and you have not typed | `is waiting for your input` |
+
+The second is completion: something finished, nothing is blocked. `CORAX_STOP=0`
+drops these and keeps everything above.
+
+| | |
+| --- | --- |
+| A turn ended | `finished a turn` |
+| A background agent ended | `finished a background agent` |
+
+A turn ends on every exchange, not only when you walk away, so it is the chatty
+one. If corax is too talkative that is the switch to reach for.
+
+Plus `corax send 'deploy done'` for your own scripts, which has nothing to do
+with Claude Code.
+
 ## Transports
 
 | | Setup | Who else can read it |
@@ -90,7 +116,7 @@ corax send 'deploy done'   # for your own scripts, nothing to do with Claude Cod
 Settings live in `~/.config/corax/config`, mode 600. The ones worth knowing:
 
 ```sh
-CORAX_STOP=0          # stop telling me when a turn finishes, only when I am needed
+CORAX_STOP=0          # drop the completion notices, keep anything waiting on me
 CORAX_REDACT=1        # send the host and the reason, but no folder or branch
 CORAX_TURN_WINDOW=90  # deduplication window for turn events, seconds
 CORAX_PERM_WINDOW=20  # and for permission prompts, which get their own
@@ -121,7 +147,7 @@ command line, so it does not appear in `ps` to other users on a shared box.
 ## What it is not
 
 It does not read your code, summarise anything, or call a model. It is a hook
-that notices four kinds of event and sends you two lines of text.
+that notices a handful of events and sends you two lines of text.
 
 It only knows about Claude Code. The event parsing is specific to Claude Code's
 hook payloads, and that specificity is the whole point. Another agent would be a

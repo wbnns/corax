@@ -19,7 +19,7 @@
 #
 # https://github.com/wbnns/corax
 
-CORAX_VERSION=0.1.2
+CORAX_VERSION=0.2.0
 
 # --- paths -------------------------------------------------------------------
 # Hooks run with a minimal environment, so resolve everything from $HOME rather
@@ -282,11 +282,13 @@ corax_hook() {
   # Per-project opt out. A branch name can carry a client name.
   [ -e "$_cwd/.no-corax" ] && exit 0
 
-  [ "$_event" = Stop ] && [ "${CORAX_STOP:-1}" != "1" ] && exit 0
-
+  # Two categories, and the difference is what CORAX_STOP switches off.
+  #   blocking   something is waiting on an answer from you
+  #   completion something finished and nothing is blocked
   _reason=
   _class=turn
   _window=${CORAX_TURN_WINDOW:-90}
+  _done=0
   case "${_ntype:-$_event}" in
     permission_prompt)
       _reason="needs permission to run a tool"
@@ -296,8 +298,8 @@ corax_hook() {
       _class=perm; _window=${CORAX_PERM_WINDOW:-20} ;;
     idle_prompt)       _reason="is waiting for your input" ;;
     agent_needs_input) _reason="has a subagent waiting on you" ;;
-    agent_completed)   _reason="finished a background agent" ;;
-    Stop)              _reason="finished a turn" ;;
+    agent_completed)   _reason="finished a background agent"; _done=1 ;;
+    Stop)              _reason="finished a turn"; _done=1 ;;
     *)
       # Never pass payload text through untouched: it is unbounded and can name
       # tools or paths. Strip it to printable ascii and cap it.
@@ -307,6 +309,10 @@ corax_hook() {
       [ -n "$_reason" ] || _reason="needs your attention" ;;
   esac
   case "$_window" in ''|*[!0-9]*) _window=90 ;; esac
+
+  # CORAX_STOP=0 drops the completion notices and keeps everything that is
+  # actually waiting on you.
+  [ "$_done" = 1 ] && [ "${CORAX_STOP:-1}" != "1" ] && exit 0
 
   corax_dedupe "$_sid" "$_class" "$_window" || exit 0
 
@@ -429,8 +435,11 @@ def has(lst, matcher):
     return False
 
 plan = [("Notification", "permission_prompt"),
+        ("Notification", "elicitation_dialog"),
+        ("Notification", "elicitation_url_dialog"),
         ("Notification", "idle_prompt"),
         ("Notification", "agent_needs_input"),
+        ("Notification", "agent_completed"),
         ("Stop", None)]
 added = 0
 for event, matcher in plan:
@@ -462,8 +471,11 @@ PY
         then . else .hooks[$ev] = ((.hooks[$ev] // []) + [{hooks:[ent]}]) end;
       (.hooks //= {})
       | addm("Notification"; "permission_prompt")
+      | addm("Notification"; "elicitation_dialog")
+      | addm("Notification"; "elicitation_url_dialog")
       | addm("Notification"; "idle_prompt")
       | addm("Notification"; "agent_needs_input")
+      | addm("Notification"; "agent_completed")
       | addp("Stop")
     ' "$_s" > "$_tmp" && cat "$_tmp" > "$_s" && rm -f "$_tmp"
   fi

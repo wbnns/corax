@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-11
+
+### Added
+
+- Three notification types now actually reach you. `elicitation_dialog` and
+  `elicitation_url_dialog` say `has a dialog waiting for an answer`, and
+  `agent_completed` says `finished a background agent`. All three had reasons
+  written for them since 0.1.0, but no matcher registered them, so the hook was
+  never called and the branches were dead. A dialog waiting on an answer blocks
+  you exactly the way a permission prompt does, which is why the two elicitation
+  types share the permission dedupe window rather than the turn one.
+- A wiring test that fails when the reason table names a notification type the
+  plugin does not register, or when the plugin and the settings.json installer
+  register different sets. This is the check that would have caught the above.
+
+### Changed
+
+- `CORAX_STOP=0` now means "drop the completion notices" rather than "drop the
+  Stop event". It silences a finished turn and a finished background agent, and
+  leaves everything that is waiting on an answer.
+
 ## [0.1.2] - 2026-09-11
 
 ### Fixed
@@ -59,7 +80,8 @@ First release.
 - Privacy controls: a `.no-corax` file per project, `CORAX_REDACT=1` to drop the
   folder and branch, and `corax off` for the whole machine.
 
-[Unreleased]: https://github.com/wbnns/corax/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/wbnns/corax/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/wbnns/corax/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/wbnns/corax/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/wbnns/corax/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/wbnns/corax/releases/tag/v0.1.0

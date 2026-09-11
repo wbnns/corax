@@ -124,6 +124,8 @@ is "redaction drops the folder and branch" "[corax] $HOST" "$got"
 printf '\nreason line\n'
 
 for pair in 'permission_prompt|needs permission to run a tool' \
+            'elicitation_dialog|has a dialog waiting for an answer' \
+            'elicitation_url_dialog|has a dialog waiting for an answer' \
             'idle_prompt|is waiting for your input' \
             'agent_needs_input|has a subagent waiting on you' \
             'agent_completed|finished a background agent'; do
@@ -156,6 +158,11 @@ reset
 backdate d2 turn 30
 is "a permission prompt is never swallowed by a turn message" \
    1 "$(count "$(payload Notification permission_prompt /tmp d2)")"
+
+reset
+backdate d2b turn 30
+is "a waiting dialog is never swallowed by a turn message either" \
+   1 "$(count "$(payload Notification elicitation_dialog /tmp d2b)")"
 
 reset
 backdate d3 turn 120
@@ -200,6 +207,18 @@ is "CORAX_STOP=0 silences Stop" \
 reset 'CORAX_STOP=0'
 is "CORAX_STOP=0 leaves permission prompts alone" \
    1 "$(count "$(payload Notification permission_prompt /tmp g5)")"
+
+reset 'CORAX_STOP=0'
+is "CORAX_STOP=0 also silences a finished background agent" \
+   0 "$(count "$(payload Notification agent_completed /tmp g5b)")"
+
+reset 'CORAX_STOP=0'
+is "CORAX_STOP=0 leaves a waiting dialog alone" \
+   1 "$(count "$(payload Notification elicitation_dialog /tmp g5c)")"
+
+reset 'CORAX_STOP=0'
+is "CORAX_STOP=0 leaves a waiting subagent alone" \
+   1 "$(count "$(payload Notification agent_needs_input /tmp g5d)")"
 
 reset
 mkdir -p "$WORK/private" && : > "$WORK/private/.no-corax"
@@ -387,6 +406,39 @@ if grep -q 'registered in' "$WORK/doc"; then
   ok "no-parser fallback: an escaped-quote corax command is still detected"
 else
   bad "no-parser fallback: an escaped-quote corax command is still detected" "registered in ..." "no match"
+fi
+
+# --- wiring ------------------------------------------------------------------
+# A reason the code can produce but no matcher delivers is dead code. This is the
+# check that would have caught the three that shipped unregistered in 0.1.x.
+
+printf '\nwiring\n'
+
+# Extract the notification types the reason table names, minus the hook-event
+# names, which are not notification types and have no matcher.
+sed -n '/case "${_ntype:-\$_event}" in/,/^  esac/p' "$CORAX" \
+  | sed -n 's/^[[:space:]]*\([a-z_|]\{1,\}\)).*/\1/p' \
+  | tr '|' '\n' | grep -v '^Stop$' | grep . | sort -u > "$WORK/handled"
+sed -n 's/.*"matcher": "\([a-z_]*\)".*/\1/p' "$ROOT/hooks/hooks.json" | sort -u > "$WORK/registered"
+sed -n '/^plan = \[/,/^        ("Stop", None)\]/p' "$CORAX" \
+  | sed -n 's/.*"Notification", "\([a-z_]*\)".*/\1/p' | sort -u > "$WORK/installer"
+
+# comm, not process substitution: this file has to run under dash and busybox.
+missing=$(comm -23 "$WORK/handled" "$WORK/registered")
+if [ -s "$WORK/handled" ] && [ -z "$missing" ]; then
+  ok "every notification type the code handles is registered by the plugin"
+else
+  bad "every notification type the code handles is registered by the plugin" \
+      "none unregistered, from a non-empty list" \
+      "handled=$(tr '\n' ' ' < "$WORK/handled")unregistered=$(printf '%s' "$missing" | tr '\n' ' ')"
+fi
+
+if [ -s "$WORK/registered" ] && cmp -s "$WORK/registered" "$WORK/installer"; then
+  ok "the settings.json installer registers the same set as the plugin"
+else
+  bad "the settings.json installer registers the same set as the plugin" \
+      "plugin: $(tr '\n' ' ' < "$WORK/registered")" \
+      "installer: $(tr '\n' ' ' < "$WORK/installer")"
 fi
 
 # --- result ------------------------------------------------------------------
