@@ -19,7 +19,7 @@
 #
 # https://github.com/wbnns/corax
 
-CORAX_VERSION=0.4.0
+CORAX_VERSION=0.4.1
 
 # --- paths -------------------------------------------------------------------
 # Hooks run with a minimal environment, so resolve everything from $HOME rather

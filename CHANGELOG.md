@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-11
+
+### Changed
+
+- New project graphic. The line-icon raven is replaced by a wireframe one with
+  the wordmark on it. `assets/corax-banner.jpg` is the artwork at its native
+  size; the og image and the square mark are resized from the same pair of
+  sources. Every filename and dimension is unchanged, so the README link and
+  anything pointing at them from outside stay put.
+
 ## [0.4.0] - 2026-09-11
 
 ### Added
