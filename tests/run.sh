@@ -354,6 +354,41 @@ else
   bad "a corax hook command in settings.json is detected" "registered in ..." "$(grep -c . "$WORK/doc") lines, no match"
 fi
 
+# The same two checks again with python3 and jq hidden, so the pure-grep fallback
+# is exercised everywhere rather than only on hosts that happen to lack both.
+mkdir -p "$WORK/thinbin"
+for _c in sh cat grep sed cut tr head wc id hostname date find basename dirname \
+          chmod mkdir rm ls curl printf; do
+  _p=$(command -v "$_c" 2>/dev/null) || continue
+  [ -x "$_p" ] && ln -sf "$_p" "$WORK/thinbin/$_c"
+done
+
+cat > "$WORK/home/.claude/settings.json" <<'JSON'
+{
+  "enabledPlugins": { "corax@corax": true },
+  "hooks": { "Notification": [ { "matcher": "idle_prompt",
+    "hooks": [{ "type": "command", "command": "$HOME/.claude/hooks/other-tool.sh" }] } ] }
+}
+JSON
+env -i HOME="$WORK/home" PATH="$WORK/thinbin" sh "$CORAX" doctor >"$WORK/doc" 2>&1 || true
+if grep -q 'BOTH as a plugin' "$WORK/doc"; then
+  bad "no-parser fallback: a plugin install alone is not a double install" "no warning" "warned"
+else
+  ok "no-parser fallback: a plugin install alone is not a double install"
+fi
+
+cat > "$WORK/home/.claude/settings.json" <<'JSON'
+{
+  "hooks": { "Stop": [ { "hooks": [{ "type": "command", "command": "sh \"$HOME/.local/bin/corax\"" }] } ] }
+}
+JSON
+env -i HOME="$WORK/home" PATH="$WORK/thinbin" sh "$CORAX" doctor >"$WORK/doc" 2>&1 || true
+if grep -q 'registered in' "$WORK/doc"; then
+  ok "no-parser fallback: an escaped-quote corax command is still detected"
+else
+  bad "no-parser fallback: an escaped-quote corax command is still detected" "registered in ..." "no match"
+fi
+
 # --- result ------------------------------------------------------------------
 
 printf '\n%s passed, %s failed\n\n' "$PASS" "$FAIL"

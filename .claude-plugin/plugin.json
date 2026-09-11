@@ -1,6 +1,6 @@
 {
   "name": "corax",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Sends you a message when a Claude Code session needs your attention, naming the machine, folder and branch that is asking. Replaces the desktop banner, which only reaches the computer you happen to be sitting at. Telegram, ntfy, any webhook, or a local command.",
   "author": {
     "name": "wbnns",

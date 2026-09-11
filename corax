@@ -19,7 +19,7 @@
 #
 # https://github.com/wbnns/corax
 
-CORAX_VERSION=0.1.1
+CORAX_VERSION=0.1.2
 
 # --- paths -------------------------------------------------------------------
 # Hooks run with a minimal environment, so resolve everything from $HOME rather
@@ -381,8 +381,10 @@ sys.exit(1)' 2>/dev/null
       "$_s" >/dev/null 2>&1
     return
   fi
-  # No parser. Only lines that are a hook command can match.
-  grep -qE '"command"[[:space:]]*:[[:space:]]*"[^"]*corax' "$_s" 2>/dev/null
+  # No parser. Require the command context so enabledPlugins cannot match, but do
+  # not try to model JSON string escaping: the command we write contains \" and a
+  # [^"]* run stops dead at it.
+  grep -qE '"command"[[:space:]]*:.*corax' "$_s" 2>/dev/null
 }
 
 # --- settings.json ------------------------------------------------------------

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-11
+
+### Fixed
+
+- On a machine with neither python3 nor jq, `doctor` could not see a corax hook
+  in `settings.json` and reported that hooks were not registered at all. The
+  pure-grep fallback modelled JSON string escaping with a `[^"]*` run, which
+  stops at the first `\"`, and the command corax installs is
+  `sh \"$HOME/.local/bin/corax\"`. It now requires only the command context.
+  Caught by the busybox CI job, which is the one host with no parser available.
+
+### Changed
+
+- The two settings-detection tests now also run with python3 and jq hidden, so
+  the fallback is exercised on every platform rather than only where both
+  parsers happen to be missing.
+
 ## [0.1.1] - 2026-09-11
 
 ### Fixed
@@ -42,6 +59,7 @@ First release.
 - Privacy controls: a `.no-corax` file per project, `CORAX_REDACT=1` to drop the
   folder and branch, and `corax off` for the whole machine.
 
-[Unreleased]: https://github.com/wbnns/corax/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/wbnns/corax/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/wbnns/corax/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/wbnns/corax/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/wbnns/corax/releases/tag/v0.1.0
