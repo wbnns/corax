@@ -1,3 +1,5 @@
+![corax](https://raw.githubusercontent.com/wbnns/corax/main/assets/corax-og.jpg)
+
 # corax
 
 **Claude Code notifications that tell you which machine and which folder is asking.**
