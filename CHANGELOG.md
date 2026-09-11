@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-11
+
+### Added
+
+- Three transports: **slack**, **discord** and **twilio**. Slack and Discord are
+  incoming webhooks, so setup is one URL and no bot. Twilio sends SMS, or
+  WhatsApp when both numbers carry a `whatsapp:` prefix.
+
+  Slack already worked through the generic `webhook` transport by accident,
+  since that POSTs `{"text": ...}` and Slack happens to want exactly that.
+  Discord did not: it wants `{"content": ...}` and rejects a body without it,
+  so a Discord URL in `CORAX_WEBHOOK_URL` failed silently. Both are now their
+  own transport, which is what gets them a menu entry, a URL sanity check, and
+  a redacted config.
+
+- `corax_escape`, because Discord renders markdown in a message. A folder called
+  `my_project` was arriving as *myproject* in italics. Telegram never needed this
+  since corax does not send `parse_mode`, and SMS has no formatting at all.
+
+- `corax init` checks Twilio credentials against the API before writing them,
+  the way it already checked a Telegram token. A typo now fails at setup rather
+  than silently at three in the morning.
+
+- Choosing Twilio writes `CORAX_STOP=0`. It is the only transport that costs
+  money, and a turn ends on every exchange, so the default would have been about
+  a hundred billed texts a day. Anything that actually blocks you still sends.
+
+- Coverage for the transports that make network requests. They had none: the
+  test suite used the `command` transport as its sink, and a sink cannot see a
+  request body. A stub `curl` on `PATH` now records argv, stdin and the body, so
+  the escaping and the credential handling are both asserted. Still no network.
+
+### Fixed
+
+- **The generic `webhook` transport put its URL on argv**, where any other user
+  on the machine could read it out of `ps`. A webhook URL carries its own secret
+  in the path, so it is a credential exactly like a bot token, and the rule that
+  covers bot tokens should always have covered it. All JSON transports now share
+  one sender that passes the URL through a curl config on stdin.
+- `CORAX_HEARTBEAT_WARN_HOURS` was documented in the README but rejected by
+  `corax config set`, so `/corax:setup` could not write it.
+- `CORAX_JQ` pointed at something that is not executable now means "there is no
+  jq" rather than "go and find a different one". A wrong override was being
+  silently ignored, and the no-parser path could not be tested on a machine that
+  has jq installed.
+
 ## [0.3.0] - 2026-09-11
 
 ### Added

@@ -36,7 +36,10 @@ somewhere, and each has a test.
 - **Permission events keep their own deduplication stamp.** If they share the
   turn stamp, a permission prompt arriving after a turn is silently swallowed.
 - **No credential ever reaches argv.** Tokens go to curl through a config on
-  stdin, so they stay out of `ps`.
+  stdin, so they stay out of `ps`. An incoming webhook URL counts as a
+  credential: the secret is in the path, so holding the URL is enough to post.
+  That reading was missed once and the generic `webhook` transport shipped with
+  its URL on argv for three releases.
 - **No payload text is passed through untouched.** Folder names, branch names
   and anything from the payload are stripped of control characters and
   truncated before they go anywhere.
@@ -68,9 +71,30 @@ somewhere, and each has a test.
 
 ## Adding a transport
 
-One `case` arm in `corax_send` and one function that takes the message as `$1`,
-returns 0 on success, writes nothing to stdout, and bounds itself with
-`--max-time`. Add it to the table in the README and to `corax init`.
+The sending is the easy half. The list below is the whole of it, because the two
+steps people skip are the two that matter: a key missing from the allowlist makes
+`/corax:setup` silently unable to configure the transport, and a credential
+missing from the redaction list gets printed by `corax config show`.
+
+In `corax`:
+
+1. A `case` arm in `corax_send`.
+2. A `corax_send_<name>` function. It takes the message as `$1`, returns 0 on
+   success, writes nothing to stdout, and bounds itself with `--max-time`. If it
+   POSTs JSON, call `corax_post_json` rather than writing another body builder.
+3. A `corax_init_<name>` function, and a line in the `cmd_init` menu. Append it
+   rather than slotting it in, so the existing numbers keep their meaning.
+4. A `case` arm in `corax_write_config`.
+5. The new keys in `corax_config_valid_key`.
+6. Any credential in the redaction list in `cmd_config show`.
+
+Then: a test in `tests/run.sh`, the two tables in the README, a bullet in
+`commands/setup.md`, the keyword lists in `package.json` and
+`.claude-plugin/plugin.json`, and a `CHANGELOG.md` entry.
+
+If the service renders markup in the message, it needs an arm in `corax_escape`.
+Folder and branch names routinely contain underscores and Discord reads those as
+italics.
 
 ## License
 

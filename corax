@@ -19,7 +19,7 @@
 #
 # https://github.com/wbnns/corax
 
-CORAX_VERSION=0.3.0
+CORAX_VERSION=0.4.0
 
 # --- paths -------------------------------------------------------------------
 # Hooks run with a minimal environment, so resolve everything from $HOME rather
@@ -94,8 +94,12 @@ corax_load_config() {
 # string values, so booleans are matched against the raw payload instead.
 
 corax_jq() {
-  if [ -n "${CORAX_JQ:-}" ] && [ -x "${CORAX_JQ:-}" ]; then
-    printf '%s' "$CORAX_JQ"
+  # An override that is not executable means "there is no jq", not "go and find
+  # me a different one". A wrong override should be visible rather than quietly
+  # ignored, and it is the only way to exercise the no-parser path on a machine
+  # that has jq installed, which is every machine CI runs on except Alpine.
+  if [ -n "${CORAX_JQ:-}" ]; then
+    [ -x "$CORAX_JQ" ] && printf '%s' "$CORAX_JQ"
     return 0
   fi
   for _c in /opt/homebrew/bin/jq /usr/bin/jq /usr/local/bin/jq; do
@@ -205,6 +209,9 @@ corax_send() {
   case "${CORAX_TRANSPORT:-}" in
     telegram) corax_send_telegram "$1" ;;
     ntfy)     corax_send_ntfy "$1" ;;
+    slack)    corax_send_slack "$1" ;;
+    discord)  corax_send_discord "$1" ;;
+    twilio)   corax_send_twilio "$1" ;;
     webhook)  corax_send_webhook "$1" ;;
     command)  corax_send_command "$1" ;;
     *)        return 1 ;;
@@ -230,19 +237,74 @@ corax_send_ntfy() {
     -d "$1" "${CORAX_NTFY_URL:-https://ntfy.sh}/${CORAX_NTFY_TOPIC}"
 }
 
-# JSON is assembled with jq when available so quotes in a branch name cannot
-# break the body; the fallback escapes the two characters that matter.
+# corax_post_json <url> <key> <text>
+#
+# Shared by every transport that POSTs JSON. Two things are deliberate here.
+#
+# The body is assembled with jq when available so quotes in a branch name cannot
+# break it; the fallback escapes the two characters that matter.
+#
+# The URL goes through a curl config on stdin rather than argv. An incoming
+# webhook URL carries its own secret in the path, which makes it a credential in
+# exactly the way a bot token is, and argv is readable with ps by every other
+# user on the box. This used to be argv, and that was a leak.
+corax_post_json() {
+  _pj_jq=$(corax_jq)
+  if [ -n "$_pj_jq" ]; then
+    _pj_body=$(printf '%s' "$3" | "$_pj_jq" -Rs --arg k "$2" '{($k): .}')
+  else
+    _pj_esc=$(printf '%s' "$3" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk 'BEGIN{ORS=""}{print (NR>1?"\\n":"") $0}')
+    _pj_body="{\"$2\":\"$_pj_esc\"}"
+  fi
+  printf 'url = "%s"\n' "$1" |
+    curl -s -o /dev/null -f --connect-timeout 3 --max-time "${CORAX_TIMEOUT:-8}" -K - \
+      -H 'Content-Type: application/json' -d "$_pj_body"
+}
+
+# corax_escape <flavour>, text on stdin
+#
+# corax_clean strips control characters, which is a different job: this is about
+# the receiving end reading the message as markup. Telegram needs nothing because
+# corax never sends parse_mode, and SMS has no formatting at all. Slack and
+# Discord both do, and a folder or branch name is exactly the sort of string that
+# contains an underscore.
+corax_escape() {
+  case "$1" in
+    slack)   sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' ;;
+    discord) sed -e 's/[\\`*_~|>]/\\&/g' ;;
+    *)       cat ;;
+  esac
+}
+
 corax_send_webhook() {
   [ -n "${CORAX_WEBHOOK_URL:-}" ] || return 1
-  _jq=$(corax_jq)
-  if [ -n "$_jq" ]; then
-    _body=$(printf '%s' "$1" | "$_jq" -Rs '{text: .}')
-  else
-    _esc=$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk 'BEGIN{ORS=""}{print (NR>1?"\\n":"") $0}')
-    _body="{\"text\":\"$_esc\"}"
-  fi
-  curl -s -o /dev/null -f --connect-timeout 3 --max-time "${CORAX_TIMEOUT:-8}" \
-    -H 'Content-Type: application/json' -d "$_body" "$CORAX_WEBHOOK_URL"
+  corax_post_json "$CORAX_WEBHOOK_URL" text "$1"
+}
+
+corax_send_slack() {
+  [ -n "${CORAX_SLACK_WEBHOOK_URL:-}" ] || return 1
+  corax_post_json "$CORAX_SLACK_WEBHOOK_URL" text "$(printf '%s' "$1" | corax_escape slack)"
+}
+
+corax_send_discord() {
+  [ -n "${CORAX_DISCORD_WEBHOOK_URL:-}" ] || return 1
+  corax_post_json "$CORAX_DISCORD_WEBHOOK_URL" content "$(printf '%s' "$1" | corax_escape discord)"
+}
+
+# Both the account sid and the auth token go through the curl config on stdin,
+# for the same reason the Telegram token does. `curl -u sid:token` would put the
+# token straight into ps.
+corax_send_twilio() {
+  [ -n "${CORAX_TWILIO_SID:-}" ] || return 1
+  [ -n "${CORAX_TWILIO_TOKEN:-}" ] || return 1
+  [ -n "${CORAX_TWILIO_FROM:-}" ] || return 1
+  [ -n "${CORAX_TWILIO_TO:-}" ] || return 1
+  printf 'url = "https://api.twilio.com/2010-04-01/Accounts/%s/Messages.json"\nuser = "%s:%s"\n' \
+    "$CORAX_TWILIO_SID" "$CORAX_TWILIO_SID" "$CORAX_TWILIO_TOKEN" |
+    curl -s -o /dev/null -f --connect-timeout 3 --max-time "${CORAX_TIMEOUT:-8}" -K - \
+      --data-urlencode "Body=$1" \
+      --data-urlencode "From=${CORAX_TWILIO_FROM}" \
+      --data-urlencode "To=${CORAX_TWILIO_TO}"
 }
 
 # The message is passed as an argument, not interpolated into a shell string,
@@ -670,6 +732,80 @@ corax_init_webhook() {
   CORAX_WEBHOOK_URL=$_u
 }
 
+# The host checks below warn rather than fail. Both services have regional and
+# proxied hosts, and refusing a URL that would have worked is worse than saying
+# it looks wrong.
+corax_init_slack() {
+  printf '\n'
+  corax_say 'In Slack, create an app, turn on Incoming Webhooks, and add one to'
+  corax_say 'the channel you want. Slack gives you a URL. Paste it here.'
+  _u=$(corax_ask 'url: ' '')
+  [ -n "$_u" ] || { corax_bad 'no url given'; return 1; }
+  case "$_u" in
+    *hooks.slack.com*) ;;
+    *) corax_warn 'that does not look like a Slack webhook url' ;;
+  esac
+  CORAX_TRANSPORT='slack'
+  CORAX_SLACK_WEBHOOK_URL=$_u
+}
+
+corax_init_discord() {
+  printf '\n'
+  corax_say 'In Discord, open the channel, then Edit Channel, Integrations,'
+  corax_say 'Webhooks, New Webhook, Copy Webhook URL. Paste it here.'
+  _u=$(corax_ask 'url: ' '')
+  [ -n "$_u" ] || { corax_bad 'no url given'; return 1; }
+  case "$_u" in
+    *discord.com*|*discordapp.com*) ;;
+    *) corax_warn 'that does not look like a Discord webhook url' ;;
+  esac
+  CORAX_TRANSPORT='discord'
+  CORAX_DISCORD_WEBHOOK_URL=$_u
+}
+
+# The only transport that costs money, so it is the only one that sets a default
+# for you: CORAX_STOP=0, written by corax_write_config. A turn ends on every
+# exchange, so leaving it on would be a hundred paid messages in a working day.
+corax_init_twilio() {
+  printf '\n'
+  corax_say 'Twilio sends real SMS, and bills you for each one.'
+  corax_say 'The account sid and auth token are on your console dashboard.'
+  _sid=$(corax_ask 'account sid: ' '')
+  [ -n "$_sid" ] || { corax_bad 'no account sid given'; return 1; }
+  _tok=$(corax_ask_secret 'auth token: ')
+  [ -n "$_tok" ] || { corax_bad 'no auth token given'; return 1; }
+
+  # Checked with -f and an exit code, not by matching the body. A Twilio 401
+  # response is itself JSON and carries a "status" key of its own, so anything
+  # that reads the body for a field name accepts a wrong token.
+  if printf 'url = "https://api.twilio.com/2010-04-01/Accounts/%s.json"\nuser = "%s:%s"\n' \
+       "$_sid" "$_sid" "$_tok" |
+     curl -s -f -o /dev/null -K - --max-time 10; then
+    corax_ok 'Twilio accepted those credentials'
+  else
+    corax_bad 'Twilio rejected that sid and token'
+    return 1
+  fi
+
+  printf '\n'
+  corax_say 'Numbers in E.164, so +351912345678. For WhatsApp instead of SMS,'
+  corax_say 'prefix both with whatsapp: and use your WhatsApp sender.'
+  _from=$(corax_ask 'from (your Twilio number): ' '')
+  [ -n "$_from" ] || { corax_bad 'no from number given'; return 1; }
+  _to=$(corax_ask 'to (your phone): ' '')
+  [ -n "$_to" ] || { corax_bad 'no to number given'; return 1; }
+
+  CORAX_TRANSPORT='twilio'
+  CORAX_TWILIO_SID=$_sid
+  CORAX_TWILIO_TOKEN=$_tok
+  CORAX_TWILIO_FROM=$_from
+  CORAX_TWILIO_TO=$_to
+  printf '\n'
+  corax_warn 'turn-finished pings are off for this transport, because each one'
+  corax_warn 'would be a billed message. anything that blocks you still sends.'
+  corax_say 'set CORAX_STOP=1 in the config if you want them back.'
+}
+
 corax_init_command() {
   printf '\n'
   corax_say 'corax will run this command with the message as its one argument.'
@@ -698,11 +834,30 @@ corax_write_config() {
         printf 'CORAX_NTFY_TOPIC=%s\n' "$CORAX_NTFY_TOPIC" ;;
       webhook)
         printf 'CORAX_WEBHOOK_URL=%s\n' "$CORAX_WEBHOOK_URL" ;;
+      slack)
+        printf 'CORAX_SLACK_WEBHOOK_URL=%s\n' "$CORAX_SLACK_WEBHOOK_URL" ;;
+      discord)
+        printf 'CORAX_DISCORD_WEBHOOK_URL=%s\n' "$CORAX_DISCORD_WEBHOOK_URL" ;;
+      twilio)
+        printf 'CORAX_TWILIO_SID=%s\n' "$CORAX_TWILIO_SID"
+        printf 'CORAX_TWILIO_TOKEN=%s\n' "$CORAX_TWILIO_TOKEN"
+        printf 'CORAX_TWILIO_FROM=%s\n' "$CORAX_TWILIO_FROM"
+        printf 'CORAX_TWILIO_TO=%s\n' "$CORAX_TWILIO_TO" ;;
       command)
         printf 'CORAX_COMMAND=%s\n' "$CORAX_COMMAND" ;;
     esac
+    # Twilio is the only transport that bills per message, and a turn ends on
+    # every exchange. Left on, that is a hundred paid texts in a working day, so
+    # it ships set rather than offered, and the commented hint below is dropped
+    # so the file does not appear to contradict itself.
+    case "$CORAX_TRANSPORT" in
+      twilio) printf 'CORAX_STOP=0          # each turn-finished ping is a billed message\n' ;;
+    esac
     printf '\n# CORAX_ENABLED=0      # silence everything on this machine\n'
-    printf '# CORAX_STOP=0         # silence only the turn-finished pings\n'
+    case "$CORAX_TRANSPORT" in
+      twilio) ;;
+      *) printf '# CORAX_STOP=0         # silence only the turn-finished pings\n' ;;
+    esac
     printf '# CORAX_REDACT=1       # send the host and reason, no folder or branch\n'
     printf '# CORAX_TURN_WINDOW=90 # dedupe window for turn events, seconds\n'
     printf '# CORAX_PERM_WINDOW=20 # dedupe window for permission events\n'
@@ -714,16 +869,24 @@ corax_write_config() {
 cmd_init() {
   printf '\ncorax setup\n\n'
   corax_say 'Where should corax send you messages?'
+  # New transports are appended rather than slotted in alphabetically, so that
+  # 1 through 4 keep meaning what they meant in every older note and screenshot.
   corax_say '  [1] telegram   a bot DM'
   corax_say '  [2] ntfy       no account needed'
   corax_say '  [3] webhook    POST JSON to any url'
   corax_say '  [4] command    run something local'
+  corax_say '  [5] slack      an incoming webhook'
+  corax_say '  [6] discord    an incoming webhook'
+  corax_say '  [7] twilio     SMS or WhatsApp, billed per message'
   _t=$(corax_ask 'choice [1]: ' 1)
   case "$_t" in
     1|telegram) corax_init_telegram || return 1 ;;
     2|ntfy)     corax_init_ntfy || return 1 ;;
     3|webhook)  corax_init_webhook || return 1 ;;
     4|command)  corax_init_command || return 1 ;;
+    5|slack)    corax_init_slack || return 1 ;;
+    6|discord)  corax_init_discord || return 1 ;;
+    7|twilio)   corax_init_twilio || return 1 ;;
     *) corax_bad "not a choice: $_t"; return 1 ;;
   esac
 
@@ -936,7 +1099,10 @@ corax_config_valid_key() {
   case "$1" in
     CORAX_TRANSPORT|CORAX_TELEGRAM_TOKEN|CORAX_TELEGRAM_CHAT|\
     CORAX_NTFY_URL|CORAX_NTFY_TOPIC|CORAX_WEBHOOK_URL|CORAX_COMMAND|\
+    CORAX_SLACK_WEBHOOK_URL|CORAX_DISCORD_WEBHOOK_URL|\
+    CORAX_TWILIO_SID|CORAX_TWILIO_TOKEN|CORAX_TWILIO_FROM|CORAX_TWILIO_TO|\
     CORAX_ENABLED|CORAX_STOP|CORAX_REDACT|CORAX_TURN_WINDOW|CORAX_PERM_WINDOW|\
+    CORAX_HEARTBEAT_WARN_HOURS|\
     CORAX_TIMEOUT) return 0 ;;
     *) return 1 ;;
   esac
@@ -972,8 +1138,13 @@ cmd_config() {
     show)
       _cf=$(corax_config_file)
       [ -r "$_cf" ] || { corax_bad "no config at $_cf"; return 1; }
+      # An incoming webhook url is a bearer credential: holding it is enough to
+      # post to that channel. It gets redacted like a token, because it is one.
       sed -e 's/^\([[:space:]]*CORAX_TELEGRAM_TOKEN=\).*/\1<redacted>/' \
-          -e 's/^\([[:space:]]*CORAX_WEBHOOK_URL=\).*/\1<redacted>/' "$_cf" ;;
+          -e 's/^\([[:space:]]*CORAX_WEBHOOK_URL=\).*/\1<redacted>/' \
+          -e 's/^\([[:space:]]*CORAX_SLACK_WEBHOOK_URL=\).*/\1<redacted>/' \
+          -e 's/^\([[:space:]]*CORAX_DISCORD_WEBHOOK_URL=\).*/\1<redacted>/' \
+          -e 's/^\([[:space:]]*CORAX_TWILIO_TOKEN=\).*/\1<redacted>/' "$_cf" ;;
     *) corax_bad "unknown: config $1"; return 1 ;;
   esac
 }
