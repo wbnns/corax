@@ -1,0 +1,932 @@
+#!/bin/sh
+# corax - tell me when Claude Code needs me, and which machine is asking.
+#
+# One file, two roles:
+#   hook mode   no arguments, a JSON payload waiting on stdin
+#   CLI mode    any argument at all
+#
+# Three rules this file must never break:
+#   1. Exit 0 on every path in hook mode. A notifier must never fail a session.
+#   2. Write nothing to stdout in hook mode. Hook stdout is fed back into the
+#      model's context on some events, so hook_main redirects it away before it
+#      does anything else.
+#   3. No configuration means a silent no-op, so this file is safe to install on
+#      a machine that has no credentials yet.
+#
+# https://github.com/wbnns/corax
+
+CORAX_VERSION=0.1.0
+
+# --- paths -------------------------------------------------------------------
+# Hooks run with a minimal environment, so resolve everything from $HOME rather
+# than trusting XDG to be exported.
+
+corax_config_dir() {
+  if [ -n "${XDG_CONFIG_HOME:-}" ]; then
+    printf '%s/corax' "$XDG_CONFIG_HOME"
+  else
+    printf '%s/.config/corax' "$HOME"
+  fi
+}
+
+corax_config_file() {
+  if [ -n "${CORAX_CONFIG:-}" ]; then
+    printf '%s' "$CORAX_CONFIG"
+  else
+    printf '%s/config' "$(corax_config_dir)"
+  fi
+}
+
+corax_state_dir() {
+  _t=${TMPDIR:-/tmp}
+  while :; do case "$_t" in */) _t=${_t%/} ;; *) break ;; esac; done
+  [ -n "$_t" ] || _t=/tmp
+  printf '%s/corax-%s' "$_t" "$(id -u 2>/dev/null || echo u)"
+}
+
+corax_load_config() {
+  _cf=$(corax_config_file)
+  [ -r "$_cf" ] || return 1
+  # shellcheck disable=SC1090
+  . "$_cf"
+  return 0
+}
+
+# --- json --------------------------------------------------------------------
+# jq when it is there, a sed fallback when it is not. The fallback only reads
+# string values, so booleans are matched against the raw payload instead.
+
+corax_jq() {
+  if [ -n "${CORAX_JQ:-}" ] && [ -x "${CORAX_JQ:-}" ]; then
+    printf '%s' "$CORAX_JQ"
+    return 0
+  fi
+  for _c in /opt/homebrew/bin/jq /usr/bin/jq /usr/local/bin/jq; do
+    [ -x "$_c" ] && { printf '%s' "$_c"; return 0; }
+  done
+  command -v jq 2>/dev/null
+}
+
+# corax_field <key> <payload>
+#
+# jq, then python3, then pure shell. The order matters: a Stop payload carries
+# last_assistant_message, which is arbitrary model output and routinely contains
+# JSON of its own. A naive regex over the whole payload can pick a "cwd" out of
+# Claude's prose instead of the real field, so the shell fallback truncates
+# there first and then takes the FIRST match rather than the last.
+corax_field() {
+  _jq=$(corax_jq)
+  if [ -n "$_jq" ]; then
+    printf '%s' "$2" | "$_jq" -r --arg k "$1" '.[$k] // empty' 2>/dev/null
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$2" | CORAX_K="$1" python3 -c 'import json,os,sys
+try: d = json.load(sys.stdin)
+except Exception: sys.exit(0)
+if isinstance(d, dict):
+    v = d.get(os.environ["CORAX_K"])
+    if isinstance(v, (str, int, float)) and not isinstance(v, bool):
+        sys.stdout.write(str(v))' 2>/dev/null
+    return
+  fi
+  # Shell only. ${var#*pat} strips the SHORTEST leading match, which is exactly
+  # first-occurrence semantics and is what a greedy sed cannot give us.
+  _p=${2%%\"last_assistant_message\"*}
+  case "$_p" in
+    *"\"$1\""*) ;;
+    *) return 0 ;;
+  esac
+  _p=${_p#*\"$1\"}
+  _p=${_p#*:}
+  while :; do case "$_p" in " "*|"	"*) _p=${_p#?} ;; *) break ;; esac; done
+  case "$_p" in
+    \"*) _p=${_p#\"}; printf '%s' "${_p%%\"*}" ;;
+  esac
+}
+
+# --- the identity line -------------------------------------------------------
+# host, folder name (never the full path), branch. This is the whole point of
+# the tool: it must be unambiguous which session is asking.
+
+# Control characters are stripped and every part is truncated, because a
+# directory name can legally contain a newline and would otherwise be able to
+# forge the reason line.
+corax_clean() {
+  printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177' | cut -c1-64
+}
+
+corax_host() {
+  _h=$(hostname -s 2>/dev/null) || _h=$(hostname 2>/dev/null) || _h=$(uname -n 2>/dev/null)
+  _h=${_h%%.*}
+  [ -n "$_h" ] || _h=unknown
+  corax_clean "$_h"
+}
+
+# corax_where <cwd>
+corax_where() {
+  _w=$(basename "$1" 2>/dev/null) || _w='?'
+  [ -n "$_w" ] || _w='?'
+  corax_clean "$_w"
+}
+
+# corax_branch <cwd> -> "main", "feat-x (worktree)", "detached 884c8b8", or empty
+corax_branch() {
+  command -v git >/dev/null 2>&1 || return 0
+  [ -d "$1" ] || return 0
+  _b=$(git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null) || return 0
+  [ -n "$_b" ] || return 0
+  if [ "$_b" = HEAD ]; then
+    _s=$(git -C "$1" rev-parse --short HEAD 2>/dev/null)
+    _b="detached ${_s:-?}"
+  fi
+  _common=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null)
+  case "$_common" in
+    ''|.git) ;;
+    *) _b="$_b (worktree)" ;;
+  esac
+  corax_clean "$_b"
+}
+
+# corax_compose <cwd> <reason>
+corax_compose() {
+  _line="[corax] $(corax_host)"
+  if [ "${CORAX_REDACT:-0}" != "1" ]; then
+    _line="$_line · $(corax_where "$1")"
+    _br=$(corax_branch "$1")
+    [ -n "$_br" ] && _line="$_line · $_br"
+  fi
+  printf '%s\n%s' "$_line" "$2"
+}
+
+# --- transports --------------------------------------------------------------
+# Every transport takes the message on stdin-free argv and returns non-zero on
+# failure. corax_send picks one. Nothing is ever eval'd.
+
+# corax_send <text>
+corax_send() {
+  case "${CORAX_TRANSPORT:-}" in
+    telegram) corax_send_telegram "$1" ;;
+    ntfy)     corax_send_ntfy "$1" ;;
+    webhook)  corax_send_webhook "$1" ;;
+    command)  corax_send_command "$1" ;;
+    *)        return 1 ;;
+  esac
+}
+
+# The bot token lives in the URL path, so the URL goes through a curl config on
+# stdin. It never reaches argv, so it never shows up in ps to other local users.
+corax_send_telegram() {
+  [ -n "${CORAX_TELEGRAM_TOKEN:-}" ] || return 1
+  [ -n "${CORAX_TELEGRAM_CHAT:-}" ] || return 1
+  printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$CORAX_TELEGRAM_TOKEN" |
+    curl -s -o /dev/null -f --connect-timeout 3 --max-time "${CORAX_TIMEOUT:-8}" -K - \
+      --data-urlencode "chat_id=${CORAX_TELEGRAM_CHAT}" \
+      --data-urlencode "text=$1" \
+      --data-urlencode "disable_web_page_preview=true"
+}
+
+corax_send_ntfy() {
+  [ -n "${CORAX_NTFY_TOPIC:-}" ] || return 1
+  curl -s -o /dev/null -f --connect-timeout 3 --max-time "${CORAX_TIMEOUT:-8}" \
+    -H "Title: corax" -H "Tags: bell" \
+    -d "$1" "${CORAX_NTFY_URL:-https://ntfy.sh}/${CORAX_NTFY_TOPIC}"
+}
+
+# JSON is assembled with jq when available so quotes in a branch name cannot
+# break the body; the fallback escapes the two characters that matter.
+corax_send_webhook() {
+  [ -n "${CORAX_WEBHOOK_URL:-}" ] || return 1
+  _jq=$(corax_jq)
+  if [ -n "$_jq" ]; then
+    _body=$(printf '%s' "$1" | "$_jq" -Rs '{text: .}')
+  else
+    _esc=$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk 'BEGIN{ORS=""}{print (NR>1?"\\n":"") $0}')
+    _body="{\"text\":\"$_esc\"}"
+  fi
+  curl -s -o /dev/null -f --connect-timeout 3 --max-time "${CORAX_TIMEOUT:-8}" \
+    -H 'Content-Type: application/json' -d "$_body" "$CORAX_WEBHOOK_URL"
+}
+
+# The message is passed as an argument, not interpolated into a shell string,
+# so a branch name can never become a command.
+corax_send_command() {
+  [ -n "${CORAX_COMMAND:-}" ] || return 1
+  "$CORAX_COMMAND" "$1"
+}
+
+# --- dedupe ------------------------------------------------------------------
+# Two classes, and the distinction is load bearing.
+#
+# idle_prompt fires about 60 seconds after a turn ends, so the turn window has
+# to sit above 60 or a Stop and the idle_prompt behind it both send.
+#
+# Permission prompts keep their own stamp. If they shared the turn stamp, a
+# permission request arriving shortly after a turn would be swallowed, and that
+# is the one message that actually blocks work.
+
+# corax_dedupe <session> <class> <window> -> 0 to send, 1 to stay quiet
+corax_dedupe() {
+  _dir=$(corax_state_dir)
+  mkdir -p "$_dir" 2>/dev/null || return 0
+  chmod 700 "$_dir" 2>/dev/null
+  _key=$(printf '%s' "${1:-nosession}" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-64)
+  _stamp="$_dir/$_key.$2"
+  _now=$(date +%s)
+  if [ -f "$_stamp" ]; then
+    _last=$(cat "$_stamp" 2>/dev/null)
+    case "$_last" in ''|*[!0-9]*) _last=0 ;; esac
+    [ $((_now - _last)) -lt "$3" ] && return 1
+  fi
+  printf '%s' "$_now" > "$_stamp" 2>/dev/null
+  find "$_dir" -type f -mtime +1 -exec rm -f {} + 2>/dev/null
+  return 0
+}
+
+# --- hook mode ---------------------------------------------------------------
+
+corax_hook() {
+  # Rule 2, applied before anything can print.
+  exec 1>&2
+  PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+  export PATH
+
+  _payload=$(cat)
+  [ -n "$_payload" ] || exit 0
+
+  # A Stop hook that already blocked must not run again. Matched on the raw
+  # payload because the sed fallback cannot read booleans.
+  case "$_payload" in
+    *'"stop_hook_active":true'*|*'"stop_hook_active": true'*) exit 0 ;;
+  esac
+
+  corax_load_config || exit 0
+  [ "${CORAX_ENABLED:-1}" = "1" ] || exit 0
+  command -v curl >/dev/null 2>&1 || exit 0
+
+  _event=$(corax_field hook_event_name "$_payload")
+  _ntype=$(corax_field notification_type "$_payload")
+  _legacy=$(corax_field message "$_payload")
+  _cwd=$(corax_field cwd "$_payload")
+  _sid=$(corax_field session_id "$_payload")
+  _agent=$(corax_field agent_id "$_payload")
+  [ -n "$_cwd" ] || _cwd=$PWD
+
+  # Subagent stops are noise. Only the main session matters.
+  [ -n "$_agent" ] && exit 0
+
+  # Per-project opt out. A branch name can carry a client name.
+  [ -e "$_cwd/.no-corax" ] && exit 0
+
+  [ "$_event" = Stop ] && [ "${CORAX_STOP:-1}" != "1" ] && exit 0
+
+  _reason=
+  _class=turn
+  _window=${CORAX_TURN_WINDOW:-90}
+  case "${_ntype:-$_event}" in
+    permission_prompt)
+      _reason="needs permission to run a tool"
+      _class=perm; _window=${CORAX_PERM_WINDOW:-20} ;;
+    elicitation_dialog|elicitation_url_dialog)
+      _reason="has a dialog waiting for an answer"
+      _class=perm; _window=${CORAX_PERM_WINDOW:-20} ;;
+    idle_prompt)       _reason="is waiting for your input" ;;
+    agent_needs_input) _reason="has a subagent waiting on you" ;;
+    agent_completed)   _reason="finished a background agent" ;;
+    Stop)              _reason="finished a turn" ;;
+    *)
+      # Never pass payload text through untouched: it is unbounded and can name
+      # tools or paths. Strip it to printable ascii and cap it.
+      if [ -n "$_legacy" ]; then
+        _reason=$(printf '%s' "$_legacy" | LC_ALL=C tr -d '\000-\037\177' | cut -c1-80)
+      fi
+      [ -n "$_reason" ] || _reason="needs your attention" ;;
+  esac
+  case "$_window" in ''|*[!0-9]*) _window=90 ;; esac
+
+  corax_dedupe "$_sid" "$_class" "$_window" || exit 0
+
+  corax_send "$(corax_compose "$_cwd" "$_reason")" 2>/dev/null
+  exit 0
+}
+
+# --- CLI helpers -------------------------------------------------------------
+
+corax_self() {
+  # Absolute path to this file, so the hook entry we write keeps working after
+  # the caller changes directory.
+  _d=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || _d=.
+  printf '%s/%s' "$_d" "$(basename -- "$0")"
+}
+
+corax_settings() { printf '%s/.claude/settings.json' "$HOME"; }
+
+corax_say()  { printf '  %s\n' "$*"; }
+corax_ok()   { printf '  \033[32mok\033[0m    %s\n' "$*"; }
+corax_warn() { printf '  \033[33mwarn\033[0m  %s\n' "$*"; }
+corax_bad()  { printf '  \033[31mfail\033[0m  %s\n' "$*"; }
+
+corax_ask() {
+  # corax_ask <prompt> <default>
+  printf '  %s' "$1" >&2
+  read -r _ans </dev/tty 2>/dev/null || _ans=
+  [ -n "$_ans" ] || _ans=$2
+  printf '%s' "$_ans"
+}
+
+corax_ask_secret() {
+  printf '  %s' "$1" >&2
+  stty -echo 2>/dev/null
+  read -r _sec </dev/tty 2>/dev/null || _sec=
+  stty echo 2>/dev/null
+  printf '\n' >&2
+  printf '%s' "$_sec"
+}
+
+corax_plugin_installed() {
+  # A plugin install puts a copy of this file under ~/.claude/plugins.
+  [ -d "$HOME/.claude/plugins" ] || return 1
+  find "$HOME/.claude/plugins" -maxdepth 4 -name corax -type f 2>/dev/null | grep -q .
+}
+
+corax_settings_has_hook() {
+  _s=$(corax_settings)
+  [ -f "$_s" ] || return 1
+  grep -q 'corax' "$_s" 2>/dev/null
+}
+
+# --- settings.json ------------------------------------------------------------
+# It may be missing, may already carry hooks from another tool, and on some
+# machines is a symlink into a dotfiles repo. So: merge, never overwrite, and
+# write through the link rather than replacing it.
+
+corax_json_tool() {
+  command -v python3 >/dev/null 2>&1 && { printf 'python3'; return 0; }
+  _j=$(corax_jq); [ -n "$_j" ] && { printf 'jq'; return 0; }
+  return 1
+}
+
+corax_hooks_install() {
+  _s=$(corax_settings)
+  _cmd="sh \"$(corax_self)\""
+  mkdir -p "$(dirname "$_s")"
+  [ -f "$_s" ] || printf '{}\n' > "$_s"
+  cp -p "$_s" "$_s.corax-backup.$(date +%s)" 2>/dev/null
+
+  if command -v python3 >/dev/null 2>&1; then
+    CORAX_CMD="$_cmd" CORAX_SETTINGS="$_s" python3 - <<'PY'
+import json, os, collections
+p = os.environ["CORAX_SETTINGS"]
+cmd = os.environ["CORAX_CMD"]
+try:
+    d = json.load(open(p), object_pairs_hook=collections.OrderedDict)
+except Exception:
+    d = collections.OrderedDict()
+if not isinstance(d, dict):
+    d = collections.OrderedDict()
+hooks = d.setdefault("hooks", collections.OrderedDict())
+entry = collections.OrderedDict([("type", "command"), ("command", cmd), ("timeout", 15)])
+
+def has(lst, matcher):
+    for g in lst:
+        if g.get("matcher") != matcher:
+            continue
+        for h in g.get("hooks", []):
+            if "corax" in str(h.get("command", "")):
+                return True
+    return False
+
+plan = [("Notification", "permission_prompt"),
+        ("Notification", "idle_prompt"),
+        ("Notification", "agent_needs_input"),
+        ("Stop", None)]
+added = 0
+for event, matcher in plan:
+    lst = hooks.setdefault(event, [])
+    if has(lst, matcher):
+        continue
+    g = collections.OrderedDict()
+    if matcher is not None:
+        g["matcher"] = matcher
+    g["hooks"] = [collections.OrderedDict(entry)]
+    lst.append(g)
+    added += 1
+with open(p, "w") as f:
+    json.dump(d, f, indent=2)
+    f.write("\n")
+print(added)
+PY
+  else
+    _j=$(corax_jq)
+    [ -n "$_j" ] || { corax_bad "need python3 or jq to edit $_s"; return 1; }
+    _tmp="$_s.corax-tmp.$$"
+    "$_j" --arg c "$_cmd" '
+      def ent: {type:"command", command:$c, timeout:15};
+      def addm($ev; $m):
+        if ([.hooks[$ev][]? | select(.matcher == $m) | .hooks[]? | select(.command | test("corax"))] | length) > 0
+        then . else .hooks[$ev] = ((.hooks[$ev] // []) + [{matcher:$m, hooks:[ent]}]) end;
+      def addp($ev):
+        if ([.hooks[$ev][]? | select(has("matcher") | not) | .hooks[]? | select(.command | test("corax"))] | length) > 0
+        then . else .hooks[$ev] = ((.hooks[$ev] // []) + [{hooks:[ent]}]) end;
+      (.hooks //= {})
+      | addm("Notification"; "permission_prompt")
+      | addm("Notification"; "idle_prompt")
+      | addm("Notification"; "agent_needs_input")
+      | addp("Stop")
+    ' "$_s" > "$_tmp" && cat "$_tmp" > "$_s" && rm -f "$_tmp"
+  fi
+}
+
+corax_hooks_uninstall() {
+  _s=$(corax_settings)
+  [ -f "$_s" ] || { corax_say "nothing to remove"; return 0; }
+  cp -p "$_s" "$_s.corax-backup.$(date +%s)" 2>/dev/null
+  if command -v python3 >/dev/null 2>&1; then
+    CORAX_SETTINGS="$_s" python3 - <<'PY'
+import json, os, collections
+p = os.environ["CORAX_SETTINGS"]
+try:
+    d = json.load(open(p), object_pairs_hook=collections.OrderedDict)
+except Exception:
+    raise SystemExit(0)
+hooks = d.get("hooks")
+if not isinstance(hooks, dict):
+    raise SystemExit(0)
+removed = 0
+for event in list(hooks):
+    groups = []
+    for g in hooks.get(event, []):
+        kept = [h for h in g.get("hooks", []) if "corax" not in str(h.get("command", ""))]
+        removed += len(g.get("hooks", [])) - len(kept)
+        if kept:
+            g["hooks"] = kept
+            groups.append(g)
+    if groups:
+        hooks[event] = groups
+    else:
+        del hooks[event]
+if not hooks:
+    del d["hooks"]
+with open(p, "w") as f:
+    json.dump(d, f, indent=2)
+    f.write("\n")
+print(removed)
+PY
+  else
+    _j=$(corax_jq)
+    [ -n "$_j" ] || { corax_bad "need python3 or jq to edit $_s"; return 1; }
+    _tmp="$_s.corax-tmp.$$"
+    "$_j" '
+      if .hooks then
+        .hooks |= with_entries(
+          .value |= (map(.hooks |= map(select((.command // "") | test("corax") | not)))
+                     | map(select((.hooks | length) > 0))))
+        | .hooks |= with_entries(select((.value | length) > 0))
+      else . end
+      | if (.hooks // {}) == {} then del(.hooks) else . end
+    ' "$_s" > "$_tmp" && cat "$_tmp" > "$_s" && rm -f "$_tmp"
+  fi
+}
+
+# --- init --------------------------------------------------------------------
+
+corax_tg_chat_id() {
+  # Reads one chat id out of a getUpdates response on stdin.
+  _j=$(corax_jq)
+  if [ -n "$_j" ]; then
+    "$_j" -r '[.result[]?.message.chat.id] | first // empty' 2>/dev/null
+  else
+    sed -n 's/.*"chat":{"id":\(-\{0,1\}[0-9]\{1,\}\).*/\1/p' | head -1
+  fi
+}
+
+corax_tg_chat_name() {
+  _j=$(corax_jq)
+  if [ -n "$_j" ]; then
+    "$_j" -r '[.result[]?.message.chat | (.title // .first_name // .username)] | first // empty' 2>/dev/null
+  else
+    sed -n 's/.*"chat":{[^}]*"first_name":"\([^"]*\)".*/\1/p' | head -1
+  fi
+}
+
+corax_init_telegram() {
+  printf '\n'
+  corax_say 'Create a bot with @BotFather on Telegram, then paste its token.'
+  _tok=$(corax_ask_secret 'token: ')
+  [ -n "$_tok" ] || { corax_bad 'no token given'; return 1; }
+
+  _me=$(printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$_tok" | curl -s -K - --max-time 10)
+  case "$_me" in
+    *'"ok":true'*) ;;
+    *) corax_bad 'Telegram rejected that token'; return 1 ;;
+  esac
+  _bot=$(printf '%s' "$_me" | sed -n 's/.*"username":"\([^"]*\)".*/\1/p' | head -1)
+  corax_ok "bot is @${_bot:-unknown}"
+
+  printf '\n'
+  corax_say "Now open Telegram and send any message to @${_bot:-your bot}."
+  printf '  waiting'
+  _n=0
+  _chat=
+  while [ "$_n" -lt 120 ]; do
+    _up=$(printf 'url = "https://api.telegram.org/bot%s/getUpdates"\n' "$_tok" | curl -s -K - --max-time 10)
+    case "$_up" in
+      *'"error_code":409'*)
+        printf '\n'
+        corax_warn 'this bot has a webhook set, so getUpdates is blocked'
+        corax_say 'Enter the chat id by hand, or delete the webhook and retry.'
+        _chat=$(corax_ask 'chat id: ' '')
+        break ;;
+    esac
+    _chat=$(printf '%s' "$_up" | corax_tg_chat_id)
+    if [ -n "$_chat" ]; then
+      _who=$(printf '%s' "$_up" | corax_tg_chat_name)
+      printf '\n'
+      corax_ok "found chat ${_who:+\"$_who\" }($_chat)"
+      break
+    fi
+    printf '.'
+    sleep 2
+    _n=$((_n + 2))
+  done
+  if [ -z "$_chat" ]; then
+    printf '\n'
+    corax_warn 'no message arrived in two minutes'
+    _chat=$(corax_ask 'chat id (or leave blank to give up): ' '')
+    [ -n "$_chat" ] || return 1
+  fi
+
+  CORAX_TRANSPORT=telegram
+  CORAX_TELEGRAM_TOKEN=$_tok
+  CORAX_TELEGRAM_CHAT=$_chat
+}
+
+corax_init_ntfy() {
+  printf '\n'
+  corax_say 'ntfy needs no account. Pick a topic nobody else would guess,'
+  corax_say 'then subscribe to it in the ntfy app on your phone.'
+  _rand=$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 12)
+  [ -n "$_rand" ] || _rand=$(date +%s)
+  _topic=$(corax_ask "topic [corax-$_rand]: " "corax-$_rand")
+  _url=$(corax_ask 'server [https://ntfy.sh]: ' 'https://ntfy.sh')
+  CORAX_TRANSPORT=ntfy
+  CORAX_NTFY_TOPIC=$_topic
+  CORAX_NTFY_URL=$_url
+  corax_ok "subscribe to \"$_topic\" at $_url"
+}
+
+corax_init_webhook() {
+  printf '\n'
+  corax_say 'corax will POST {"text": "..."} to this URL.'
+  _u=$(corax_ask 'url: ' '')
+  [ -n "$_u" ] || { corax_bad 'no url given'; return 1; }
+  CORAX_TRANSPORT=webhook
+  CORAX_WEBHOOK_URL=$_u
+}
+
+corax_init_command() {
+  printf '\n'
+  corax_say 'corax will run this command with the message as its one argument.'
+  _c=$(corax_ask 'command: ' '')
+  [ -n "$_c" ] || { corax_bad 'no command given'; return 1; }
+  CORAX_TRANSPORT=command
+  CORAX_COMMAND=$_c
+}
+
+corax_write_config() {
+  _dir=$(corax_config_dir)
+  mkdir -p "$_dir" || return 1
+  chmod 700 "$_dir" 2>/dev/null
+  _cf=$(corax_config_file)
+  umask 077
+  {
+    printf '# corax configuration. Written by `corax init`.\n'
+    printf '# https://github.com/wbnns/corax\n\n'
+    printf 'CORAX_TRANSPORT=%s\n' "$CORAX_TRANSPORT"
+    case "$CORAX_TRANSPORT" in
+      telegram)
+        printf 'CORAX_TELEGRAM_TOKEN=%s\n' "$CORAX_TELEGRAM_TOKEN"
+        printf 'CORAX_TELEGRAM_CHAT=%s\n' "$CORAX_TELEGRAM_CHAT" ;;
+      ntfy)
+        printf 'CORAX_NTFY_URL=%s\n' "$CORAX_NTFY_URL"
+        printf 'CORAX_NTFY_TOPIC=%s\n' "$CORAX_NTFY_TOPIC" ;;
+      webhook)
+        printf 'CORAX_WEBHOOK_URL=%s\n' "$CORAX_WEBHOOK_URL" ;;
+      command)
+        printf 'CORAX_COMMAND=%s\n' "$CORAX_COMMAND" ;;
+    esac
+    printf '\n# CORAX_ENABLED=0      # silence everything on this machine\n'
+    printf '# CORAX_STOP=0         # silence only the turn-finished pings\n'
+    printf '# CORAX_REDACT=1       # send the host and reason, no folder or branch\n'
+    printf '# CORAX_TURN_WINDOW=90 # dedupe window for turn events, seconds\n'
+    printf '# CORAX_PERM_WINDOW=20 # dedupe window for permission events\n'
+  } > "$_cf"
+  chmod 600 "$_cf"
+  corax_ok "wrote $_cf"
+}
+
+cmd_init() {
+  printf '\ncorax setup\n\n'
+  corax_say 'Where should corax send you messages?'
+  corax_say '  [1] telegram   a bot DM'
+  corax_say '  [2] ntfy       no account needed'
+  corax_say '  [3] webhook    POST JSON to any url'
+  corax_say '  [4] command    run something local'
+  _t=$(corax_ask 'choice [1]: ' 1)
+  case "$_t" in
+    1|telegram) corax_init_telegram || return 1 ;;
+    2|ntfy)     corax_init_ntfy || return 1 ;;
+    3|webhook)  corax_init_webhook || return 1 ;;
+    4|command)  corax_init_command || return 1 ;;
+    *) corax_bad "not a choice: $_t"; return 1 ;;
+  esac
+
+  corax_write_config || return 1
+
+  printf '\n'
+  if corax_plugin_installed; then
+    corax_ok 'plugin is installed, so the hooks are already registered'
+  else
+    _r=$(corax_ask 'Register the hooks in ~/.claude/settings.json? [Y/n] ' Y)
+    case "$_r" in
+      [Nn]*) corax_warn 'skipped. run `corax hooks install` when you are ready' ;;
+      *) corax_hooks_install >/dev/null && corax_ok "registered hooks in $(corax_settings)" ;;
+    esac
+  fi
+
+  printf '\n'
+  if corax_send "$(corax_compose "$PWD" 'is set up and working')" 2>/dev/null; then
+    corax_ok 'sent a test message, go and look'
+  else
+    corax_bad 'could not send the test message. try `corax doctor`'
+    return 1
+  fi
+  printf '\n'
+  corax_say 'Restart any Claude Code session that is already running.'
+  printf '\n'
+}
+
+# --- send --------------------------------------------------------------------
+
+cmd_send() {
+  [ "$#" -ge 1 ] || { corax_bad 'usage: corax send TEXT'; return 1; }
+  corax_load_config || { corax_bad 'no config, run: corax init'; return 1; }
+  [ "${CORAX_ENABLED:-1}" = "1" ] || { corax_warn 'corax is off, run: corax on'; return 1; }
+  corax_send "[corax] $(corax_host): $*"
+}
+
+# --- doctor ------------------------------------------------------------------
+
+cmd_doctor() {
+  printf '\ncorax %s\n\n' "$CORAX_VERSION"
+  _fail=0
+
+  if command -v curl >/dev/null 2>&1; then corax_ok 'curl'
+  else corax_bad 'curl is missing, corax cannot send anything'; _fail=1; fi
+
+  _j=$(corax_jq)
+  if [ -n "$_j" ]; then corax_ok "jq  $_j"
+  else corax_warn 'no jq, falling back to sed parsing (fine, just less robust)'; fi
+
+  _cf=$(corax_config_file)
+  if [ -r "$_cf" ]; then
+    corax_ok "config  $_cf"
+    _perm=$(ls -l "$_cf" 2>/dev/null | cut -c1-10)
+    case "$_perm" in
+      -rw-------) ;;
+      *) corax_warn "config is $_perm, should be -rw------- (chmod 600)" ;;
+    esac
+  else
+    corax_bad "no config at $_cf, run: corax init"
+    _fail=1
+  fi
+
+  corax_load_config 2>/dev/null
+  if [ -n "${CORAX_TRANSPORT:-}" ]; then corax_ok "transport  $CORAX_TRANSPORT"
+  else corax_bad 'no transport configured'; _fail=1; fi
+
+  [ "${CORAX_ENABLED:-1}" = "1" ] || corax_warn 'CORAX_ENABLED=0, everything is silenced'
+  [ "${CORAX_STOP:-1}" = "1" ] || corax_warn 'CORAX_STOP=0, turn-finished pings are silenced'
+  [ "${CORAX_REDACT:-0}" = "1" ] && corax_say 'redaction on, folder and branch are not sent'
+
+  # Two install paths both registering the same script means two messages per
+  # event, because hook entries merge rather than replace.
+  _plug=no; corax_plugin_installed && _plug=yes
+  _sett=no; corax_settings_has_hook && _sett=yes
+  if [ "$_plug" = yes ] && [ "$_sett" = yes ]; then
+    corax_bad 'installed BOTH as a plugin and in settings.json'
+    corax_say 'you will get two messages per event. remove one:'
+    corax_say '  corax hooks uninstall        (keep the plugin)'
+    corax_say '  /plugin uninstall corax      (keep settings.json)'
+    _fail=1
+  elif [ "$_plug" = yes ]; then
+    corax_ok 'hooks  registered by the plugin'
+  elif [ "$_sett" = yes ]; then
+    corax_ok "hooks  registered in $(corax_settings)"
+  else
+    corax_bad 'hooks are not registered anywhere, run: corax hooks install'
+    _fail=1
+  fi
+
+  _dir=$(corax_state_dir)
+  if mkdir -p "$_dir" 2>/dev/null; then corax_ok "state  $_dir"
+  else corax_warn "cannot write $_dir, dedupe will not work"; fi
+
+  [ -e "$PWD/.no-corax" ] && corax_warn 'this folder has .no-corax, it will never notify'
+
+  printf '\n  it would send:\n\n'
+  corax_compose "$PWD" 'needs permission to run a tool' | sed 's/^/    /'
+  printf '\n'
+
+  if [ "$_fail" = 0 ]; then
+    corax_say 'all good. `corax test` sends one of each.'
+  fi
+  printf '\n'
+  return "$_fail"
+}
+
+# --- test --------------------------------------------------------------------
+
+cmd_test() {
+  corax_load_config || { corax_bad "no config, run: corax init"; return 1; }
+  _rc=0
+  for _r in 'needs permission to run a tool' \
+            'is waiting for your input' \
+            'finished a turn'; do
+    if corax_send "$(corax_compose "$PWD" "$_r")"; then
+      corax_ok "sent: $_r"
+    else
+      corax_bad "failed: $_r"
+      _rc=1
+    fi
+  done
+  return "$_rc"
+}
+
+# --- on / off ----------------------------------------------------------------
+
+corax_set_flag() {
+  _cf=$(corax_config_file)
+  [ -r "$_cf" ] || { corax_bad "no config at $_cf"; return 1; }
+  _tmp="$_cf.tmp.$$"
+  grep -v '^[[:space:]]*CORAX_ENABLED=' "$_cf" > "$_tmp" 2>/dev/null
+  printf 'CORAX_ENABLED=%s\n' "$1" >> "$_tmp"
+  cat "$_tmp" > "$_cf" && rm -f "$_tmp"
+  chmod 600 "$_cf"
+}
+
+cmd_on()  { corax_set_flag 1 && corax_ok 'corax is on'; }
+cmd_off() { corax_set_flag 0 && corax_ok 'corax is off on this machine'; }
+
+# --- hooks -------------------------------------------------------------------
+
+cmd_hooks() {
+  case "${1:-show}" in
+    install)
+      _n=$(corax_hooks_install) || return 1
+      case "$_n" in
+        ''|*[!0-9]*) corax_ok "registered hooks in $(corax_settings)" ;;
+        0) corax_ok "hooks were already registered in $(corax_settings)" ;;
+        *) corax_ok "registered $_n hook entries in $(corax_settings)" ;;
+      esac
+      corax_say 'restart any running Claude Code session' ;;
+    uninstall)
+      _n=$(corax_hooks_uninstall) || return 1
+      case "$_n" in
+        ''|*[!0-9]*) corax_ok "removed corax hooks from $(corax_settings)" ;;
+        *) corax_ok "removed $_n hook entries from $(corax_settings)" ;;
+      esac ;;
+    show)
+      _s=$(corax_settings)
+      [ -f "$_s" ] || { corax_say "no $_s"; return 0; }
+      if command -v python3 >/dev/null 2>&1; then
+        CORAX_SETTINGS="$_s" python3 -c 'import json,os,sys
+try: d=json.load(open(os.environ["CORAX_SETTINGS"]))
+except Exception: sys.exit(0)
+print(json.dumps(d.get("hooks",{}), indent=2))'
+      else
+        grep -n corax "$_s" || corax_say 'no corax entries'
+      fi ;;
+    *) corax_bad "unknown: hooks $1"; return 1 ;;
+  esac
+}
+
+# --- config (non-interactive) -------------------------------------------------
+# `corax init` reads from the terminal, which a Claude Code slash command does
+# not have. These give the /corax:setup command a way to write the same config
+# without a TTY.
+
+corax_config_valid_key() {
+  case "$1" in
+    CORAX_TRANSPORT|CORAX_TELEGRAM_TOKEN|CORAX_TELEGRAM_CHAT|\
+    CORAX_NTFY_URL|CORAX_NTFY_TOPIC|CORAX_WEBHOOK_URL|CORAX_COMMAND|\
+    CORAX_ENABLED|CORAX_STOP|CORAX_REDACT|CORAX_TURN_WINDOW|CORAX_PERM_WINDOW|\
+    CORAX_TIMEOUT) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+corax_config_set() {
+  corax_config_valid_key "$1" || { corax_bad "not a corax setting: $1"; return 1; }
+  # Reject anything that is not printable ascii on one line: the config file is
+  # sourced by the shell, so a newline in a value would become a new statement.
+  if [ "$(printf '%s' "$2" | tr -d '\040-\176' | wc -c | tr -d ' ')" != 0 ]; then
+    corax_bad 'value must be printable ascii on one line'
+    return 1
+  fi
+  _dir=$(corax_config_dir)
+  mkdir -p "$_dir" || return 1
+  chmod 700 "$_dir" 2>/dev/null
+  _cf=$(corax_config_file)
+  umask 077
+  [ -f "$_cf" ] || : > "$_cf"
+  _tmp="$_cf.tmp.$$"
+  grep -v "^[[:space:]]*$1=" "$_cf" > "$_tmp" 2>/dev/null || : > "$_tmp"
+  printf '%s=%s\n' "$1" "$2" >> "$_tmp"
+  cat "$_tmp" > "$_cf" && rm -f "$_tmp"
+  chmod 600 "$_cf"
+}
+
+cmd_config() {
+  case "${1:-show}" in
+    set)
+      [ "$#" -eq 3 ] || { corax_bad 'usage: corax config set KEY VALUE'; return 1; }
+      corax_config_set "$2" "$3" && corax_ok "set $2" ;;
+    path) corax_config_file; printf '\n' ;;
+    show)
+      _cf=$(corax_config_file)
+      [ -r "$_cf" ] || { corax_bad "no config at $_cf"; return 1; }
+      sed -e 's/^\([[:space:]]*CORAX_TELEGRAM_TOKEN=\).*/\1<redacted>/' \
+          -e 's/^\([[:space:]]*CORAX_WEBHOOK_URL=\).*/\1<redacted>/' "$_cf" ;;
+    *) corax_bad "unknown: config $1"; return 1 ;;
+  esac
+}
+
+# corax telegram-chat <token>
+# Polls getUpdates once and prints a chat id, so a slash command can loop.
+cmd_telegram_chat() {
+  [ -n "${1:-}" ] || { corax_bad 'usage: corax telegram-chat TOKEN'; return 1; }
+  _up=$(printf 'url = "https://api.telegram.org/bot%s/getUpdates"\n' "$1" |
+        curl -s -K - --max-time 10)
+  case "$_up" in
+    *'"error_code":409'*) corax_bad 'this bot has a webhook set, getUpdates is blocked'; return 2 ;;
+    *'"ok":false'*)       corax_bad 'Telegram rejected that token'; return 1 ;;
+  esac
+  _c=$(printf '%s' "$_up" | corax_tg_chat_id)
+  [ -n "$_c" ] || return 3
+  printf '%s\n' "$_c"
+}
+
+# --- usage -------------------------------------------------------------------
+
+cmd_usage() {
+  cat <<'USAGE'
+corax - tell me when Claude Code needs me, and which machine is asking.
+
+  corax init                  set up a transport and register the hooks
+  corax doctor                check every link in the chain
+  corax test                  send one message of each kind
+  corax send TEXT             send an arbitrary message, for your own scripts
+  corax off                   silence this machine
+  corax on                    unsilence it
+  corax hooks install         add the hooks to ~/.claude/settings.json
+  corax hooks uninstall       take them out again
+  corax hooks show            print the hooks block
+  corax config set K V        set one setting without a prompt
+  corax config show           print the config, secrets redacted
+  corax config path           print where the config lives
+  corax version               print the version
+
+Per project, drop a .no-corax file in the root and that repo never notifies.
+https://github.com/wbnns/corax
+USAGE
+}
+
+# --- dispatch ----------------------------------------------------------------
+# A hook invocation has no arguments and a payload waiting on stdin. Claude Code
+# always pipes JSON and never passes arguments, and no subcommand is the empty
+# string, so the two cases cannot be confused. With no arguments and a terminal
+# on stdin, this is a person typing `corax`, so show the usage.
+
+if [ "$#" -eq 0 ]; then
+  if [ -t 0 ]; then
+    cmd_usage
+    exit 0
+  fi
+  corax_hook
+fi
+
+case "$1" in
+  init)            shift; cmd_init "$@" ;;
+  send)            shift; cmd_send "$@" ;;
+  doctor)          shift; cmd_doctor "$@" ;;
+  test)            shift; cmd_test "$@" ;;
+  on)              shift; cmd_on "$@" ;;
+  off)             shift; cmd_off "$@" ;;
+  hooks)           shift; cmd_hooks "$@" ;;
+  config)          shift; cmd_config "$@" ;;
+  telegram-chat)   shift; cmd_telegram_chat "$@" ;;
+  version|--version|-v) printf 'corax %s\n' "$CORAX_VERSION" ;;
+  help|--help|-h)  cmd_usage ;;
+  *)               printf 'corax: unknown command: %s\n\n' "$1" >&2; cmd_usage >&2; exit 1 ;;
+esac

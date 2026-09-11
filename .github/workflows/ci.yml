@@ -1,0 +1,49 @@
+# CI -- the GitHub-native "definition of done". Every job is a thin wrapper over
+# the same bin/check that runs locally, so a green `bin/check` on your machine
+# predicts a green pipeline here.
+#
+# The matrix exists because corax is POSIX shell that runs wherever Claude Code
+# runs, and that is where the real bugs live: BSD and GNU userland disagree about
+# sed, date, find and stat, and busybox has a third opinion. Ubuntu covers dash
+# (which is /bin/sh on Debian), macOS covers the BSD tools, and the Alpine job
+# covers busybox ash with no bash present at all.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install shellcheck and dash
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y shellcheck dash
+      - name: Install shellcheck
+        if: runner.os == 'macOS'
+        run: brew install shellcheck
+      - name: Check
+        run: bin/check
+
+  busybox:
+    name: Check (alpine, busybox ash)
+    runs-on: ubuntu-latest
+    container: alpine:latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install what corax needs, and nothing more
+        run: apk add --no-cache git curl
+      - name: Check
+        run: sh bin/check

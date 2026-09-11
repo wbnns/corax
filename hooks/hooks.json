@@ -1,0 +1,32 @@
+{
+  "description": "Sends a notification when this session needs the user's attention, naming the machine, folder and branch.",
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/corax\"", "timeout": 15 }
+        ]
+      },
+      {
+        "matcher": "idle_prompt",
+        "hooks": [
+          { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/corax\"", "timeout": 15 }
+        ]
+      },
+      {
+        "matcher": "agent_needs_input",
+        "hooks": [
+          { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/corax\"", "timeout": 15 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "sh \"${CLAUDE_PLUGIN_ROOT}/corax\"", "timeout": 15 }
+        ]
+      }
+    ]
+  }
+}

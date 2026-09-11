@@ -1,0 +1,16 @@
+{
+  "name": "corax",
+  "version": "0.1.0",
+  "description": "Tells you when a Claude Code session needs your attention, and which machine is asking.",
+  "bin": { "corax": "./corax" },
+  "files": ["corax", "README.md", "LICENSE"],
+  "scripts": { "test": "sh tests/run.sh" },
+  "keywords": ["claude-code", "notifications", "telegram", "ntfy", "webhook", "hooks"],
+  "homepage": "https://github.com/wbnns/corax",
+  "repository": { "type": "git", "url": "git+https://github.com/wbnns/corax.git" },
+  "bugs": { "url": "https://github.com/wbnns/corax/issues" },
+  "author": "wbnns <hello@wbnns.com>",
+  "license": "MIT",
+  "os": ["darwin", "linux"],
+  "engines": { "node": ">=18" }
+}
