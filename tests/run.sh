@@ -408,6 +408,108 @@ else
   bad "no-parser fallback: an escaped-quote corax command is still detected" "registered in ..." "no match"
 fi
 
+# --- heartbeat ---------------------------------------------------------------
+# The question configuration cannot answer: did Claude Code actually call us?
+# Everything else can be green while corax is deaf, because hooks load at session
+# start and a session older than the install never got them.
+
+printf '\nheartbeat\n'
+
+hb="$WORK/home/.local/state/corax/last-hook"
+
+# It must record even when corax decides to send nothing, or it would only prove
+# that a message went out, which is the thing we already knew.
+for case_ in 'normal|' \
+             'muted|CORAX_ENABLED=0' \
+             'stop silenced|CORAX_STOP=0'; do
+  label=${case_%%|*}; extra=${case_#*|}
+  rm -rf "$WORK/home/.local"
+  if [ -n "$extra" ]; then reset "$extra"; else reset; fi
+  printf '%s' "$(payload Stop '' /tmp hb-$$)" | env \
+    HOME="$WORK/home" CORAX_CONFIG="$WORK/config" CORAX_SINK="$WORK/sink" \
+    TMPDIR="$WORK/state" sh "$CORAX" >/dev/null 2>&1
+  if [ -r "$hb" ]; then ok "records a hook that sent nothing: $label"
+  else bad "records a hook that sent nothing: $label" "a heartbeat file" "none"; fi
+done
+
+rm -rf "$WORK/home/.local"
+printf '%s' "$(payload Stop '' /tmp hb2)" | env \
+  HOME="$WORK/home" CORAX_CONFIG=/nonexistent TMPDIR="$WORK/state" sh "$CORAX" >/dev/null 2>&1
+if [ -r "$hb" ]; then ok "records a hook with no config at all"
+else bad "records a hook with no config at all" "a heartbeat file" "none"; fi
+
+is "records which event fired" "Stop" "$(cut -d' ' -f2 "$hb")"
+
+# It must survive a swept TMPDIR: the dedupe stamps live there and losing one
+# costs a duplicate message, but losing the heartbeat reads as corax being deaf.
+rm -rf "$WORK/state"
+if [ -r "$hb" ]; then ok "survives a swept TMPDIR"
+else bad "survives a swept TMPDIR" "still there" "gone"; fi
+
+rm -rf "$WORK/home/.local"
+reset
+HOME="$WORK/home" sh "$CORAX" doctor >"$WORK/doc" 2>&1 || true
+if grep -q 'no hook has ever fired' "$WORK/doc"; then
+  ok "doctor says so when no hook has ever fired"
+else
+  bad "doctor says so when no hook has ever fired" "never fired warning" "absent"
+fi
+
+mkdir -p "$WORK/home/.local/state/corax"
+printf '%s Stop\n' "$(( $(date +%s) - 108000 ))" > "$hb"
+HOME="$WORK/home" sh "$CORAX" doctor >"$WORK/doc" 2>&1 || true
+if grep -q 'no hook for 30 hours' "$WORK/doc"; then
+  ok "doctor warns on a stale heartbeat and names the age"
+else
+  bad "doctor warns on a stale heartbeat and names the age" "no hook for 30 hours" \
+      "$(grep heartbeat "$WORK/doc" | head -1)"
+fi
+
+printf '%s Notification\n' "$(date +%s)" > "$hb"
+HOME="$WORK/home" sh "$CORAX" doctor >"$WORK/doc" 2>&1 || true
+if grep -q 'last hook .* ago (Notification)' "$WORK/doc"; then
+  ok "doctor reports a fresh heartbeat with its event"
+else
+  bad "doctor reports a fresh heartbeat with its event" "last hook N ago (Notification)" \
+      "$(grep heartbeat "$WORK/doc" | head -1)"
+fi
+
+# --- housekeeping ------------------------------------------------------------
+# Nothing corax writes may grow without bound. Two files behave differently and
+# both need proving.
+
+printf '\nhousekeeping\n'
+
+# The heartbeat is overwritten, not appended, so it is one line forever.
+rm -rf "$WORK/home/.local"
+reset
+i=0
+while [ "$i" -lt 200 ]; do
+  printf '%s' "$(payload Stop '' /tmp "grow$i")" | env \
+    HOME="$WORK/home" CORAX_CONFIG="$WORK/config" CORAX_SINK="$WORK/sink" \
+    TMPDIR="$WORK/state" sh "$CORAX" >/dev/null 2>&1
+  i=$(( i + 1 ))
+done
+is "the heartbeat stays one line after 200 hooks" 1 \
+   "$(wc -l < "$WORK/home/.local/state/corax/last-hook" | tr -d ' ')"
+
+# The dedupe stamps are one small file per session, swept after a day.
+sd="$WORK/state/corax-$(id -u 2>/dev/null || echo u)"
+mkdir -p "$sd"
+i=0
+while [ "$i" -lt 20 ]; do
+  : > "$sd/stale$i.turn"
+  touch -t "$(date -v-2d '+%Y%m%d%H%M' 2>/dev/null || date -d '2 days ago' '+%Y%m%d%H%M')" \
+    "$sd/stale$i.turn" 2>/dev/null
+  i=$(( i + 1 ))
+done
+printf '%s' "$(date +%s)" > "$sd/recent.turn"
+printf '%s' "$(payload Stop '' /tmp sweeptrigger)" | env \
+  HOME="$WORK/home" CORAX_CONFIG="$WORK/config" CORAX_SINK="$WORK/sink" \
+  TMPDIR="$WORK/state" sh "$CORAX" >/dev/null 2>&1
+is "day-old dedupe stamps are swept" 0 "$(ls -1 "$sd" | grep -c '^stale' || true)"
+is "recent dedupe stamps are kept" 1 "$(ls -1 "$sd" | grep -c '^recent' || true)"
+
 # --- wiring ------------------------------------------------------------------
 # A reason the code can produce but no matcher delivers is dead code. This is the
 # check that would have caught the three that shipped unregistered in 0.1.x.

@@ -19,7 +19,7 @@
 #
 # https://github.com/wbnns/corax
 
-CORAX_VERSION=0.2.0
+CORAX_VERSION=0.3.0
 
 # --- paths -------------------------------------------------------------------
 # Hooks run with a minimal environment, so resolve everything from $HOME rather
@@ -46,6 +46,39 @@ corax_state_dir() {
   while :; do case "$_t" in */) _t=${_t%/} ;; *) break ;; esac; done
   [ -n "$_t" ] || _t=/tmp
   printf '%s/corax-%s' "$_t" "$(id -u 2>/dev/null || echo u)"
+}
+
+# Dedupe stamps live in TMPDIR because losing them costs one duplicate message.
+# The heartbeat must NOT: macOS sweeps /var/folders and Linux clears /tmp on boot,
+# and a heartbeat that vanishes reads as "corax has gone deaf" when it has not.
+corax_state_home() {
+  if [ -n "${XDG_STATE_HOME:-}" ]; then
+    printf '%s/corax' "$XDG_STATE_HOME"
+  else
+    printf '%s/.local/state/corax' "$HOME"
+  fi
+}
+
+corax_heartbeat_file() { printf '%s/last-hook' "$(corax_state_home)"; }
+
+# Written on EVERY hook invocation, before any guard can exit. The question it
+# answers is "did Claude Code call us at all", which is separate from whether we
+# decided to send anything. Nothing else can answer it: doctor checks
+# configuration, and configuration was green the whole time corax was deaf.
+corax_heartbeat_write() {
+  _hd=$(corax_state_home)
+  mkdir -p "$_hd" 2>/dev/null || return 0
+  printf '%s %s\n' "$(date +%s)" "${1:-unknown}" > "$(corax_heartbeat_file)" 2>/dev/null
+  return 0
+}
+
+# corax_age <seconds> -> "3 minutes", "2 hours", "4 days"
+corax_age() {
+  if [ "$1" -lt 90 ]; then printf '%s seconds' "$1"
+  elif [ "$1" -lt 5400 ]; then printf '%s minutes' "$(( $1 / 60 ))"
+  elif [ "$1" -lt 172800 ]; then printf '%s hours' "$(( $1 / 3600 ))"
+  else printf '%s days' "$(( $1 / 86400 ))"
+  fi
 }
 
 corax_load_config() {
@@ -257,6 +290,15 @@ corax_hook() {
 
   _payload=$(cat)
   [ -n "$_payload" ] || exit 0
+
+  # Before every guard below, including the unconfigured one. If Claude Code
+  # called us, that is worth recording even when we go on to send nothing.
+  case "$_payload" in
+    *'"hook_event_name"'*)
+      corax_heartbeat_write "$(printf '%s' "$_payload" |
+        sed -n 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\([A-Za-z]*\)".*/\1/p' | head -1)" ;;
+    *) corax_heartbeat_write unknown ;;
+  esac
 
   # A Stop hook that already blocked must not run again. Matched on the raw
   # payload because the sed fallback cannot read booleans.
@@ -776,6 +818,35 @@ cmd_doctor() {
   _dir=$(corax_state_dir)
   if mkdir -p "$_dir" 2>/dev/null; then corax_ok "state  $_dir"
   else corax_warn "cannot write $_dir, dedupe will not work"; fi
+
+  # The check that configuration cannot make: has Claude Code actually called us?
+  # Everything above can be green while corax is deaf, because hooks load at
+  # session start and a session older than the install never got them.
+  _hb=$(corax_heartbeat_file)
+  if [ -r "$_hb" ]; then
+    _hbt=$(cut -d' ' -f1 "$_hb" 2>/dev/null)
+    _hbe=$(cut -d' ' -f2 "$_hb" 2>/dev/null)
+    case "$_hbt" in
+      ''|*[!0-9]*) corax_warn "heartbeat  unreadable at $_hb" ;;
+      *)
+        _hba=$(( $(date +%s) - _hbt ))
+        [ "$_hba" -lt 0 ] && _hba=0
+        _warnh=${CORAX_HEARTBEAT_WARN_HOURS:-24}
+        case "$_warnh" in ''|*[!0-9]*) _warnh=24 ;; esac
+        if [ "$_hba" -lt $(( _warnh * 3600 )) ]; then
+          corax_ok "heartbeat  last hook $(corax_age "$_hba") ago (${_hbe:-unknown})"
+        else
+          corax_warn "heartbeat  no hook for $(corax_age "$_hba")"
+          corax_say "if you have used Claude Code since then, its hooks are stale."
+          corax_say "restart the session: hooks load at startup, not on change."
+        fi ;;
+    esac
+  else
+    corax_warn "heartbeat  no hook has ever fired on this machine"
+    corax_say "hooks load when a session starts, so a session older than the"
+    corax_say "install never got them. restart any running Claude Code session."
+    _fail=1
+  fi
 
   [ -e "$PWD/.no-corax" ] && corax_warn 'this folder has .no-corax, it will never notify'
 

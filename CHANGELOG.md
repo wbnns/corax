@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-11
+
+### Added
+
+- A heartbeat. corax records a timestamp and the event name on every hook
+  invocation, before any guard, so the record exists even when it goes on to send
+  nothing. `doctor` reports it: `last hook 4 minutes ago (Notification)`, or a
+  warning when nothing has fired for a day, or when nothing has ever fired.
+- `CORAX_HEARTBEAT_WARN_HOURS`, default 24.
+- Tests that nothing corax writes grows without bound: the heartbeat is
+  overwritten rather than appended, so it is one line after two hundred hooks,
+  and the day-old dedupe stamps really are swept. The sweep had shipped since
+  0.1.0 without a test.
+
+  This exists because `doctor` could report every check green while corax was
+  delivering nothing at all. Hooks load when a session starts, so any session
+  already running when you install corax never gets them, and configuration
+  cannot see that. The heartbeat is the only thing that can distinguish "set up
+  correctly" from "actually being called".
+
+  It lives in `~/.local/state/corax/`, not the temp directory that holds the
+  dedupe stamps. Losing a stamp costs one duplicate message; losing the heartbeat
+  would read as corax having gone deaf, and macOS sweeps `/var/folders` while
+  Linux clears `/tmp` on boot.
+
 ## [0.2.0] - 2026-09-11
 
 ### Added
@@ -80,7 +105,8 @@ First release.
 - Privacy controls: a `.no-corax` file per project, `CORAX_REDACT=1` to drop the
   folder and branch, and `corax off` for the whole machine.
 
-[Unreleased]: https://github.com/wbnns/corax/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/wbnns/corax/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/wbnns/corax/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/wbnns/corax/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/wbnns/corax/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/wbnns/corax/compare/v0.1.0...v0.1.1

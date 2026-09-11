@@ -113,6 +113,19 @@ corax on              # unsilence it
 corax send 'deploy done'   # for your own scripts, nothing to do with Claude Code
 ```
 
+`doctor` answers the one question configuration cannot. corax writes a heartbeat
+on every hook invocation, so it can tell you whether Claude Code has actually
+called it, not merely whether it is set up correctly. Those are different, and
+the difference is the failure you will hit: hooks load when a session starts, so
+a session already running when you install corax never gets them, and everything
+else looks green while nothing arrives.
+
+```
+ok    heartbeat  last hook 4 minutes ago (Notification)
+warn  heartbeat  no hook for 30 hours
+warn  heartbeat  no hook has ever fired on this machine
+```
+
 Settings live in `~/.config/corax/config`, mode 600. The ones worth knowing:
 
 ```sh
@@ -120,7 +133,20 @@ CORAX_STOP=0          # drop the completion notices, keep anything waiting on me
 CORAX_REDACT=1        # send the host and the reason, but no folder or branch
 CORAX_TURN_WINDOW=90  # deduplication window for turn events, seconds
 CORAX_PERM_WINDOW=20  # and for permission prompts, which get their own
+CORAX_HEARTBEAT_WARN_HOURS=24   # when doctor starts calling the heartbeat stale
 ```
+
+## What it leaves on disk
+
+Two files, neither of which grows without bound.
+
+| | Where | Size |
+| --- | --- | --- |
+| Heartbeat | `~/.local/state/corax/last-hook` | One line, overwritten every time. 16 bytes, forever. |
+| Dedupe stamps | `$TMPDIR/corax-<uid>/` | One ten-byte file per session, swept after a day. |
+
+Nothing is appended to, so there is no log to rotate. The stamps are the only
+thing that accumulates, and they are cleaned on the next hook after they age out.
 
 ## Privacy
 
