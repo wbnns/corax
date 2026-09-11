@@ -494,21 +494,31 @@ is "the heartbeat stays one line after 200 hooks" 1 \
    "$(wc -l < "$WORK/home/.local/state/corax/last-hook" | tr -d ' ')"
 
 # The dedupe stamps are one small file per session, swept after a day.
+# Count matching files with a glob, not `ls | grep`: filenames are not a text
+# stream, and shellcheck is right to object.
+countglob() {
+  _n=0
+  for _f in $1; do [ -e "$_f" ] && _n=$(( _n + 1 )); done
+  printf '%s' "$_n"
+}
+
 sd="$WORK/state/corax-$(id -u 2>/dev/null || echo u)"
 mkdir -p "$sd"
 i=0
 while [ "$i" -lt 20 ]; do
   : > "$sd/stale$i.turn"
-  touch -t "$(date -v-2d '+%Y%m%d%H%M' 2>/dev/null || date -d '2 days ago' '+%Y%m%d%H%M')" \
-    "$sd/stale$i.turn" 2>/dev/null
+  # A fixed past date, not date arithmetic. BSD wants -v-2d, GNU wants
+  # -d "2 days ago", and busybox date accepts neither, which is how this test
+  # passed on a Mac and failed on Alpine.
+  touch -t 202001010000 "$sd/stale$i.turn" 2>/dev/null
   i=$(( i + 1 ))
 done
 printf '%s' "$(date +%s)" > "$sd/recent.turn"
 printf '%s' "$(payload Stop '' /tmp sweeptrigger)" | env \
   HOME="$WORK/home" CORAX_CONFIG="$WORK/config" CORAX_SINK="$WORK/sink" \
   TMPDIR="$WORK/state" sh "$CORAX" >/dev/null 2>&1
-is "day-old dedupe stamps are swept" 0 "$(ls -1 "$sd" | grep -c '^stale' || true)"
-is "recent dedupe stamps are kept" 1 "$(ls -1 "$sd" | grep -c '^recent' || true)"
+is "day-old dedupe stamps are swept" 0 "$(countglob "$sd/stale*")"
+is "recent dedupe stamps are kept" 1 "$(countglob "$sd/recent*")"
 
 # --- wiring ------------------------------------------------------------------
 # A reason the code can produce but no matcher delivers is dead code. This is the

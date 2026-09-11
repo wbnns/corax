@@ -113,6 +113,25 @@ corax on              # unsilence it
 corax send 'deploy done'   # for your own scripts, nothing to do with Claude Code
 ```
 
+If you installed the plugin, the hooks are already registered and you can ignore
+the rest of this. If you installed the script on its own:
+
+```sh
+corax hooks install   # add the hooks to ~/.claude/settings.json
+corax hooks uninstall # take them out again, leaving other tools' hooks alone
+corax hooks show      # print the hooks block
+```
+
+And for setting things without a prompt, which is how the plugin's `/corax:setup`
+drives it:
+
+```sh
+corax config set CORAX_TRANSPORT ntfy
+corax config show     # secrets redacted
+corax config path
+corax telegram-chat TOKEN   # your chat id, once you have messaged the bot
+```
+
 `doctor` answers the one question configuration cannot. corax writes a heartbeat
 on every hook invocation, so it can tell you whether Claude Code has actually
 called it, not merely whether it is set up correctly. Those are different, and
@@ -126,15 +145,30 @@ warn  heartbeat  no hook for 30 hours
 warn  heartbeat  no hook has ever fired on this machine
 ```
 
-Settings live in `~/.config/corax/config`, mode 600. The ones worth knowing:
+## Settings
 
-```sh
-CORAX_STOP=0          # drop the completion notices, keep anything waiting on me
-CORAX_REDACT=1        # send the host and the reason, but no folder or branch
-CORAX_TURN_WINDOW=90  # deduplication window for turn events, seconds
-CORAX_PERM_WINDOW=20  # and for permission prompts, which get their own
-CORAX_HEARTBEAT_WARN_HOURS=24   # when doctor starts calling the heartbeat stale
-```
+All of it lives in `~/.config/corax/config`, mode 600, written by `corax init`.
+It is plain `KEY=value` sourced by the shell, so you can edit it by hand.
+
+| Key | Default | |
+| --- | --- | --- |
+| `CORAX_TRANSPORT` | | `telegram`, `ntfy`, `webhook` or `command` |
+| `CORAX_TELEGRAM_TOKEN` | | From @BotFather |
+| `CORAX_TELEGRAM_CHAT` | | Found for you by `corax init` |
+| `CORAX_NTFY_TOPIC` | | Pick something unguessable; `init` generates one |
+| `CORAX_NTFY_URL` | `https://ntfy.sh` | Your own server, if you run one |
+| `CORAX_WEBHOOK_URL` | | Receives `{"text": "..."}` |
+| `CORAX_COMMAND` | | Gets the message as its one argument |
+| `CORAX_ENABLED` | `1` | `0` silences everything. `corax off` sets this |
+| `CORAX_STOP` | `1` | `0` drops the completion notices, keeps anything waiting on you |
+| `CORAX_REDACT` | `0` | `1` sends the host and reason but no folder or branch |
+| `CORAX_TURN_WINDOW` | `90` | Dedupe window for turn events, seconds |
+| `CORAX_PERM_WINDOW` | `20` | And for anything blocking, which gets its own |
+| `CORAX_HEARTBEAT_WARN_HOURS` | `24` | When `doctor` starts calling the heartbeat stale |
+| `CORAX_TIMEOUT` | `8` | Seconds before a send is abandoned |
+
+Every one of them can also be set in the environment, which is how the test
+suite drives corax without touching your real configuration.
 
 ## What it leaves on disk
 

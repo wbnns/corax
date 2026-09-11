@@ -1011,7 +1011,9 @@ corax - tell me when Claude Code needs me, and which machine is asking.
   corax config set K V        set one setting without a prompt
   corax config show           print the config, secrets redacted
   corax config path           print where the config lives
+  corax telegram-chat TOKEN   print your chat id once you have messaged the bot
   corax version               print the version
+  corax help                  this
 
 Per project, drop a .no-corax file in the root and that repo never notifies.
 https://github.com/wbnns/corax

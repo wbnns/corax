@@ -41,6 +41,16 @@ somewhere, and each has a test.
   and anything from the payload are stripped of control characters and
   truncated before they go anywhere.
 - **Missing configuration is a silent no-op**, never an error.
+- **The heartbeat is written before every guard.** It answers "did Claude Code
+  call us", which is a different question from "did we send anything". A
+  heartbeat that only appeared on a successful send would prove nothing, because
+  the failure it exists to catch is corax never being called at all.
+- **Nothing corax writes grows without bound.** The heartbeat is overwritten, not
+  appended. The dedupe stamps are one small file per session and are swept after
+  a day. If you add a third file, it needs the same guarantee and a test.
+- **Every notification type the reason table names must be registered**, in both
+  `hooks/hooks.json` and the settings installer. A reason with no matcher is dead
+  code that looks alive; three of them shipped that way through three releases.
 
 ## Before you open a PR
 
@@ -48,7 +58,12 @@ somewhere, and each has a test.
 - **Add a test.** The suite is plain POSIX shell in `tests/run.sh` with no
   framework. A bug fix without a failing-then-passing test is hard to keep.
 - **Stay POSIX.** The script runs under `dash` and busybox `ash`, not just
-  bash. No `[[`, no arrays, no `local`, no `$'...'`, no `<<<`.
+  bash. No `[[`, no arrays, no `local`, no `$'...'`, no `<<<`, and no process
+  substitution in the tests either.
+- **Watch the userland split in tests, not only in the script.** `date -v-2d` is
+  BSD, `date -d '2 days ago'` is GNU, and busybox takes neither. Prefer a fixed
+  literal over date arithmetic. Two CI failures so far have been the test making
+  an assumption, not the code being wrong.
 - **Explain why in a comment, not what.** The what is readable from the code.
 
 ## Adding a transport
