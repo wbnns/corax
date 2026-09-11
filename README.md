@@ -62,7 +62,7 @@ corax init
 `corax` is one POSIX shell script with no dependency but `curl`. There is no
 node, no python, no virtualenv. If you would rather read it before running it,
 it is about nine hundred lines with the reasoning in the comments, and you can
-also `npx corax init` or clone the repo and run `./corax` in place.
+also `npx @wbnns/corax init` or clone the repo and run `./corax` in place.
 
 ## Transports
 

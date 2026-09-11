@@ -1,5 +1,5 @@
 {
-  "name": "corax",
+  "name": "@wbnns/corax",
   "version": "0.1.0",
   "description": "Tells you when a Claude Code session needs your attention, and which machine is asking.",
   "bin": {
